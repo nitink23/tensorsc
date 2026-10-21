@@ -5,9 +5,12 @@
 //! - [`Storage`]: owns a flat buffer on a device. Shared between tensors via `Arc`.
 //! - [`Tensor`]: a *view* onto a storage, described by shape, strides, offset and dtype.
 
+mod arith;
 pub mod device;
 pub mod dtype;
 pub mod error;
+pub mod indexing;
+mod kernels;
 pub mod ops;
 pub mod storage;
 mod strided;

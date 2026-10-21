@@ -9,9 +9,10 @@ def test_from_nested_list():
     assert t.ndim == 2
     assert t.numel() == 6
     assert t.strides == (3, 1)
-    assert t.dtype == "float32"
+    assert t.dtype == "int64"
     assert t.device == "cpu"
-    assert t.tolist() == [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+    assert t.tolist() == [[1, 2, 3], [4, 5, 6]]
+    assert all(type(x) is int for x in t.tolist()[0])
     assert ts.Tensor((1.5, 2.5)).tolist() == [1.5, 2.5]
 
 
@@ -57,7 +58,7 @@ def test_indexing():
         t[2, 0]
     with pytest.raises(IndexError, match="too many indices"):
         t[0, 0, 0]
-    with pytest.raises(TypeError):
+    with pytest.raises(IndexError):
         t["a"]
     assert ts.tensor([5, 6])[1] == 6.0
 
@@ -72,4 +73,5 @@ def test_copies_are_independent():
 
 
 def test_repr():
-    assert repr(ts.tensor([[1, 2], [3, 4]])) == "tensor([[1.0, 2.0], [3.0, 4.0]])"
+    assert repr(ts.tensor([[1, 2], [3, 4]])) == "tensor([[1, 2], [3, 4]])"
+    assert repr(ts.tensor([[1.0, 2], [3, 4]])) == "tensor([[1.0, 2.0], [3.0, 4.0]])"

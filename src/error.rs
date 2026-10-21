@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::dtype::DType;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TensorError {
     /// The number of data elements doesn't match the product of the shape.
@@ -37,6 +39,17 @@ pub enum TensorError {
     BroadcastMismatch {
         left: Vec<usize>,
         right: Vec<usize>,
+    },
+    /// An index that doesn't fit the tensor (wrong mask shape, bad index dtype).
+    InvalidIndex(String),
+    /// The tensor's memory can't be written (e.g. a read-only NumPy array).
+    ReadOnly,
+    /// Integer division or remainder by zero.
+    DivisionByZero,
+    /// The operation isn't defined for this dtype.
+    UnsupportedDType {
+        op: &'static str,
+        dtype: DType,
     },
     InvalidArgument(String),
 }
@@ -82,6 +95,12 @@ impl fmt::Display for TensorError {
                     f,
                     "shapes {left:?} and {right:?} cannot be broadcast together"
                 )
+            }
+            TensorError::InvalidIndex(msg) => f.write_str(msg),
+            TensorError::ReadOnly => f.write_str("tensor is read-only"),
+            TensorError::DivisionByZero => f.write_str("integer division by zero"),
+            TensorError::UnsupportedDType { op, dtype } => {
+                write!(f, "{op} is not supported for {dtype} tensors")
             }
             TensorError::InvalidArgument(msg) => f.write_str(msg),
         }

@@ -344,7 +344,13 @@ impl Tensor {
                         offset += first * self.strides[axis];
                     }
                     shape.push(len);
-                    strides.push(self.strides[axis] * step);
+                    // With fewer than two elements the stride is never used, and
+                    // `stride * step` could overflow for huge steps (`t[::10**30]`).
+                    strides.push(if len > 1 {
+                        self.strides[axis] * step
+                    } else {
+                        self.strides[axis]
+                    });
                     axis += 1;
                 }
                 TensorIndex::NewAxis => {
@@ -439,13 +445,13 @@ mod tests {
         assert!(xt.view(&[6]).is_err());
         let flat = xt.reshape(&[6]).unwrap();
         assert!(!flat.shares_storage(&x));
-        assert_eq!(flat.to_vec(), vec![0.0, 3.0, 1.0, 4.0, 2.0, 5.0]);
+        assert_eq!(flat.to_vec::<f32>(), vec![0.0, 3.0, 1.0, 4.0, 2.0, 5.0]);
 
         // But a strided slice whose rows line up can still be viewed.
         let every_other = range(&[4, 6]).slice(1, None, None, 2).unwrap();
         let flat = every_other.view(&[12]).unwrap();
         assert_eq!(flat.strides(), &[2]);
-        assert_eq!(flat.to_vec(), every_other.to_vec());
+        assert_eq!(flat.to_vec::<f32>(), every_other.to_vec::<f32>());
     }
 
     #[test]
@@ -454,7 +460,7 @@ mod tests {
         // No two neighbouring axes line up, so no merge works, but splitting does.
         let x = range(&[2, 3, 4]).permute(&[1, 0, 2]).unwrap();
         let split = x.view(&[3, 2, 2, 2]).unwrap();
-        assert_eq!(split.to_vec(), x.to_vec());
+        assert_eq!(split.to_vec::<f32>(), x.to_vec::<f32>());
         assert!(x.view(&[3, 8]).is_err());
         assert!(x.view(&[6, 4]).is_err());
 
@@ -463,7 +469,7 @@ mod tests {
         let y = range(&[2, 3, 4]).permute(&[2, 0, 1]).unwrap();
         let merged = y.view(&[4, 6]).unwrap();
         assert_eq!(merged.strides(), &[1, 4]);
-        assert_eq!(merged.to_vec(), y.to_vec());
+        assert_eq!(merged.to_vec::<f32>(), y.to_vec::<f32>());
     }
 
     #[test]
@@ -471,7 +477,7 @@ mod tests {
         let x = range(&[2, 3, 4]);
         assert_eq!(x.flatten(0, -1).unwrap().shape(), &[24]);
         assert_eq!(x.flatten(1, 2).unwrap().shape(), &[2, 12]);
-        assert_eq!(Tensor::scalar(1.0).flatten(0, -1).unwrap().shape(), &[1]);
+        assert_eq!(Tensor::scalar(1.0f32).flatten(0, -1).unwrap().shape(), &[1]);
 
         let y = range(&[1, 3, 1]);
         assert_eq!(y.squeeze(None).unwrap().shape(), &[3]);
@@ -504,24 +510,30 @@ mod tests {
     fn basic_indexing() {
         let x = range(&[3, 4]);
         assert_eq!(
-            x.index(&[Index(1)]).unwrap().to_vec(),
+            x.index(&[Index(1)]).unwrap().to_vec::<f32>(),
             vec![4.0, 5.0, 6.0, 7.0]
         );
         assert_eq!(
-            x.index(&[Index(-1), Index(-1)]).unwrap().item().unwrap(),
+            x.index(&[Index(-1), Index(-1)])
+                .unwrap()
+                .item()
+                .unwrap()
+                .to_f64(),
             11.0
         );
         assert_eq!(
-            x.index(&[TensorIndex::FULL, Index(1)]).unwrap().to_vec(),
+            x.index(&[TensorIndex::FULL, Index(1)])
+                .unwrap()
+                .to_vec::<f32>(),
             vec![1.0, 5.0, 9.0]
         );
         let rev = x
             .index(&[s(None, None, -1), s(Some(1), Some(3), 1)])
             .unwrap();
         assert_eq!(rev.shape(), &[3, 2]);
-        assert_eq!(rev.to_vec(), vec![9.0, 10.0, 5.0, 6.0, 1.0, 2.0]);
+        assert_eq!(rev.to_vec::<f32>(), vec![9.0, 10.0, 5.0, 6.0, 1.0, 2.0]);
         assert_eq!(
-            x.index(&[Ellipsis, Index(0)]).unwrap().to_vec(),
+            x.index(&[Ellipsis, Index(0)]).unwrap().to_vec::<f32>(),
             vec![0.0, 4.0, 8.0]
         );
         assert_eq!(
@@ -529,6 +541,9 @@ mod tests {
             &[1, 3, 4, 1]
         );
         assert_eq!(x.index(&[s(Some(5), None, 1)]).unwrap().shape(), &[0, 4]);
+        // A huge step selects one element without overflowing the stride.
+        let one = x.index(&[s(None, None, isize::MAX)]).unwrap();
+        assert_eq!(one.to_vec::<f32>(), vec![0.0, 1.0, 2.0, 3.0]);
 
         assert!(matches!(
             x.index(&[Index(0), Index(0), Index(0)]),
@@ -545,10 +560,10 @@ mod tests {
     #[test]
     fn writes_go_through_views() {
         let x = range(&[3, 4]);
-        x.select(0, 1).unwrap().fill(-1.0);
-        x.slice(1, None, None, 3).unwrap().fill(9.0);
+        x.select(0, 1).unwrap().fill(-1.0).unwrap();
+        x.slice(1, None, None, 3).unwrap().fill(9.0).unwrap();
         assert_eq!(
-            x.to_vec(),
+            x.to_vec::<f32>(),
             vec![
                 9.0, 1.0, 2.0, 9.0, 9.0, -1.0, -1.0, 9.0, 9.0, 9.0, 10.0, 9.0
             ]
@@ -558,7 +573,7 @@ mod tests {
         let row = x.select(0, 2).unwrap();
         row.copy_from(&row.slice(0, None, None, -1).unwrap())
             .unwrap();
-        assert_eq!(row.to_vec(), vec![9.0, 10.0, 9.0, 9.0]);
+        assert_eq!(row.to_vec::<f32>(), vec![9.0, 10.0, 9.0, 9.0]);
 
         assert!(matches!(
             row.copy_from(&range(&[3])),
@@ -574,6 +589,6 @@ mod tests {
         let c = xt.contiguous();
         assert!(!c.shares_storage(&x));
         assert!(c.is_contiguous());
-        assert_eq!(c.to_vec(), xt.to_vec());
+        assert_eq!(c.to_vec::<f32>(), xt.to_vec::<f32>());
     }
 }

@@ -2,7 +2,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::device::Device;
-use crate::dtype::DType;
+use crate::dtype::{DType, Element, Scalar, with_dtype};
 use crate::error::{Result, TensorError};
 use crate::storage::Storage;
 
@@ -12,14 +12,13 @@ use crate::storage::Storage;
 /// `offset + i0 * strides[0] + i1 * strides[1] + ...`. Changing shape, strides
 /// and offset (without touching the buffer) is how reshape, transpose and
 /// slicing avoid copying data; see `views.rs`. Strides are signed so reversed
-/// views (`t[::-1]`) can be expressed too.
+/// views (`t[::-1]`) can be expressed too. The dtype is the storage's.
 #[derive(Debug)]
 pub struct Tensor {
     pub(crate) storage: Arc<Storage>,
     pub(crate) shape: Vec<usize>,
     pub(crate) strides: Vec<isize>,
     pub(crate) offset: usize,
-    pub(crate) dtype: DType,
 }
 
 /// Row-major strides: the last axis is contiguous in memory.
@@ -34,8 +33,9 @@ pub fn contiguous_strides(shape: &[usize]) -> Vec<isize> {
 impl Tensor {
     // ---- creation ----
 
-    /// Wraps `data` (row-major) in a new tensor with the given shape.
-    pub fn from_vec(data: Vec<f32>, shape: &[usize]) -> Result<Tensor> {
+    /// Wraps `data` (row-major) in a new tensor with the given shape. The
+    /// dtype comes from the element type.
+    pub fn from_vec<T: Element>(data: Vec<T>, shape: &[usize]) -> Result<Tensor> {
         let numel: usize = shape.iter().product();
         if data.len() != numel {
             return Err(TensorError::DataShapeMismatch {
@@ -43,7 +43,7 @@ impl Tensor {
                 shape: shape.to_vec(),
             });
         }
-        let storage = Arc::new(Storage::new(data, Device::Cpu));
+        let storage = Arc::new(Storage::from_vec(data, Device::Cpu));
         Ok(Tensor::from_parts(
             storage,
             shape.to_vec(),
@@ -66,7 +66,6 @@ impl Tensor {
             shape,
             strides,
             offset,
-            dtype: DType::F32,
         }
     }
 
@@ -77,54 +76,84 @@ impl Tensor {
         strides: Vec<isize>,
         offset: usize,
     ) -> Tensor {
-        debug_assert_eq!(shape.len(), strides.len());
-        Tensor {
-            storage: Arc::clone(&self.storage),
-            shape,
-            strides,
-            offset,
-            dtype: self.dtype,
-        }
+        Tensor::from_parts(Arc::clone(&self.storage), shape, strides, offset)
     }
 
-    pub fn full(shape: &[usize], value: f32) -> Tensor {
+    pub fn full(shape: &[usize], value: impl Into<Scalar>, dtype: DType) -> Tensor {
+        let value = value.into();
         let numel = shape.iter().product();
-        Tensor::from_vec(vec![value; numel], shape).expect("length matches shape")
+        with_dtype!(dtype, T => Tensor::from_vec(vec![value.to::<T>(); numel], shape))
+            .expect("length matches shape")
     }
 
-    pub fn zeros(shape: &[usize]) -> Tensor {
-        Tensor::full(shape, 0.0)
+    pub fn zeros(shape: &[usize], dtype: DType) -> Tensor {
+        Tensor::full(shape, 0i64, dtype)
     }
 
-    pub fn ones(shape: &[usize]) -> Tensor {
-        Tensor::full(shape, 1.0)
+    pub fn ones(shape: &[usize], dtype: DType) -> Tensor {
+        Tensor::full(shape, 1i64, dtype)
     }
 
     /// A 0-dimensional tensor holding one value.
-    pub fn scalar(value: f32) -> Tensor {
-        Tensor::full(&[], value)
+    pub fn scalar<T: Element>(value: T) -> Tensor {
+        Tensor::from_vec(vec![value], &[]).expect("one element fills shape []")
     }
 
-    /// Evenly spaced values in `[start, end)`, like `numpy.arange`.
-    pub fn arange(start: f32, end: f32, step: f32) -> Result<Tensor> {
-        if step == 0.0 || !step.is_finite() {
+    /// Evenly spaced values in `[start, end)`, like `numpy.arange`. With all
+    /// integer arguments the arithmetic is exact; otherwise it's done in f64.
+    pub fn arange(start: Scalar, end: Scalar, step: Scalar, dtype: DType) -> Result<Tensor> {
+        let ints = |s: Scalar| !matches!(s, Scalar::Float(_));
+        if ints(start) && ints(end) && ints(step) {
+            let (start, end, step) = (start.to_i64(), end.to_i64(), step.to_i64());
+            if step == 0 {
+                return Err(TensorError::InvalidArgument(
+                    "arange step must not be zero".into(),
+                ));
+            }
+            // Ceiling division of the span by the step, in i128 so it can't overflow.
+            let (span, step_wide) = (end as i128 - start as i128, step as i128);
+            let len = if (span > 0) == (step > 0) && span != 0 {
+                ((span.abs() - 1) / step_wide.abs() + 1) as usize
+            } else {
+                0
+            };
+            return Ok(with_dtype!(dtype, T => Tensor::from_vec(
+                (0..len as i64).map(|i| T::from_i64(start + i * step)).collect(),
+                &[len],
+            ))?);
+        }
+        let (start, end, step) = (start.to_f64(), end.to_f64(), step.to_f64());
+        if step == 0.0 || !step.is_finite() || !start.is_finite() || !end.is_finite() {
             return Err(TensorError::InvalidArgument(
-                "arange step must be a non-zero finite number".into(),
+                "arange needs finite bounds and a non-zero finite step".into(),
             ));
         }
         let len = ((end - start) / step).ceil().max(0.0) as usize;
-        let data = (0..len).map(|i| start + i as f32 * step).collect();
-        Tensor::from_vec(data, &[len])
+        with_dtype!(dtype, T => Tensor::from_vec(
+            (0..len).map(|i| T::from_f64(start + i as f64 * step)).collect(),
+            &[len],
+        ))
     }
 
     /// A new tensor with its own contiguous copy of this tensor's elements.
     pub fn deep_copy(&self) -> Tensor {
-        Tensor::from_vec(self.to_vec(), &self.shape).expect("length matches shape")
+        with_dtype!(self.dtype(), T => Tensor::from_vec(self.to_vec::<T>(), &self.shape))
+            .expect("length matches shape")
     }
 
     /// Another handle to the same view: same storage, same layout, no copy.
     pub fn shallow_clone(&self) -> Tensor {
         self.with_layout(self.shape.clone(), self.strides.clone(), self.offset)
+    }
+
+    /// This tensor converted to `dtype`: shares memory if it already has that
+    /// dtype, otherwise a converted copy (see [`Element::cast`]).
+    pub fn to_dtype(&self, dtype: DType) -> Tensor {
+        if dtype == self.dtype() {
+            return self.shallow_clone();
+        }
+        with_dtype!(dtype, T => Tensor::from_vec(self.to_vec::<T>(), &self.shape))
+            .expect("length matches shape")
     }
 
     // ---- metadata ----
@@ -151,11 +180,20 @@ impl Tensor {
     }
 
     pub fn dtype(&self) -> DType {
-        self.dtype
+        self.storage.dtype()
     }
 
     pub fn device(&self) -> Device {
         self.storage.device()
+    }
+
+    pub fn storage(&self) -> &Arc<Storage> {
+        &self.storage
+    }
+
+    /// False for tensors over read-only memory (e.g. a read-only NumPy array).
+    pub fn is_writable(&self) -> bool {
+        self.storage.is_writable()
     }
 
     /// True when elements are laid out row-major with no gaps, i.e. the view
@@ -200,50 +238,51 @@ impl Tensor {
         Ok(pos as usize)
     }
 
-    pub fn get(&self, index: &[usize]) -> Result<f32> {
+    pub fn get(&self, index: &[usize]) -> Result<Scalar> {
         let pos = self.storage_index(index)?;
-        Ok(self.storage.read()[pos])
+        Ok(with_dtype!(self.dtype(), T => self.storage.read::<T>()[pos].to_scalar()))
     }
 
-    /// Writes one element. Takes `&self` because storage is shared: the write
-    /// is visible through every view of the same buffer.
-    pub fn set(&self, index: &[usize], value: f32) -> Result<()> {
+    /// Writes one element, converted to this tensor's dtype. Takes `&self`
+    /// because storage is shared: the write is visible through every view.
+    pub fn set(&self, index: &[usize], value: impl Into<Scalar>) -> Result<()> {
         let pos = self.storage_index(index)?;
-        self.storage.write()[pos] = value;
+        let value = value.into();
+        with_dtype!(self.dtype(), T => self.storage.write::<T>()?[pos] = value.to::<T>());
         Ok(())
     }
 
     /// The value of a one-element tensor, whatever its shape.
-    pub fn item(&self) -> Result<f32> {
+    pub fn item(&self) -> Result<Scalar> {
         if self.numel() != 1 {
             return Err(TensorError::InvalidArgument(format!(
                 "only one-element tensors can be converted to a scalar, this one has {}",
                 self.numel()
             )));
         }
-        Ok(self.storage.read()[self.offset])
+        Ok(with_dtype!(self.dtype(), T => self.storage.read::<T>()[self.offset].to_scalar()))
     }
 
-    /// Copies `src` element-by-element into this view. `src` is broadcast to
-    /// this view's shape, and a single element is written everywhere.
-    /// Safe even when `src` overlaps this view, e.g. `t[0] = t[1]`.
+    /// Copies `src` element-by-element into this view, converting to this
+    /// tensor's dtype. `src` is broadcast to this view's shape. Safe even when
+    /// `src` overlaps this view, e.g. `t[0] = t[1]`.
     pub fn copy_from(&self, src: &Tensor) -> Result<()> {
         if src.numel() == 1 {
-            self.fill(src.item()?);
-            return Ok(());
+            return self.fill(src.item()?);
         }
-        self.zip_map_assign(src, |_, y| y)
+        let src = src.to_dtype(self.dtype());
+        with_dtype!(self.dtype(), T => self.zip_map_assign::<T>(&src, |_, y| y))
     }
 
-    /// All elements in logical row-major order, regardless of memory layout.
-    pub fn to_vec(&self) -> Vec<f32> {
-        self.map_to_vec(|x| x)
+    /// All elements in logical row-major order, converted to `T`.
+    pub fn to_vec<T: Element>(&self) -> Vec<T> {
+        with_dtype!(self.dtype(), S => self.map_to_vec::<S, T>(|x| x.cast::<T>()))
     }
 }
 
-fn fmt_nested(f: &mut fmt::Formatter<'_>, data: &[f32], shape: &[usize]) -> fmt::Result {
+fn fmt_nested<T: Element>(f: &mut fmt::Formatter<'_>, data: &[T], shape: &[usize]) -> fmt::Result {
     match shape.split_first() {
-        None => write!(f, "{:?}", data[0]),
+        None => data[0].write(f),
         Some((&len, rest)) => {
             let chunk: usize = rest.iter().product();
             f.write_str("[")?;
@@ -259,9 +298,14 @@ fn fmt_nested(f: &mut fmt::Formatter<'_>, data: &[f32], shape: &[usize]) -> fmt:
 }
 
 impl fmt::Display for Tensor {
+    /// `tensor([[1.0, 2.0]])`, with the dtype spelled out (as PyTorch does)
+    /// unless it's what the values would get by default.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("tensor(")?;
-        fmt_nested(f, &self.to_vec(), &self.shape)?;
+        with_dtype!(self.dtype(), T => fmt_nested(f, &self.to_vec::<T>(), &self.shape))?;
+        if !matches!(self.dtype(), DType::F32 | DType::I64 | DType::Bool) {
+            write!(f, ", dtype={}", self.dtype())?;
+        }
         f.write_str(")")
     }
 }
@@ -284,7 +328,7 @@ mod tests {
     #[test]
     fn from_vec_checks_length() {
         assert_eq!(
-            Tensor::from_vec(vec![1.0, 2.0, 3.0], &[2, 2]).unwrap_err(),
+            Tensor::from_vec(vec![1.0f32, 2.0, 3.0], &[2, 2]).unwrap_err(),
             TensorError::DataShapeMismatch {
                 len: 3,
                 shape: vec![2, 2]
@@ -293,11 +337,21 @@ mod tests {
     }
 
     #[test]
+    fn dtype_comes_from_the_element_type() {
+        assert_eq!(
+            Tensor::from_vec(vec![1i32], &[1]).unwrap().dtype(),
+            DType::I32
+        );
+        assert_eq!(Tensor::scalar(true).dtype(), DType::Bool);
+        assert_eq!(Tensor::zeros(&[2], DType::U8).dtype(), DType::U8);
+    }
+
+    #[test]
     fn get_and_set() {
         let x = t(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
-        assert_eq!(x.get(&[1, 2]).unwrap(), 6.0);
-        x.set(&[0, 1], 9.0).unwrap();
-        assert_eq!(x.to_vec(), vec![1.0, 9.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(x.get(&[1, 2]).unwrap(), Scalar::Float(6.0));
+        x.set(&[0, 1], 9).unwrap();
+        assert_eq!(x.to_vec::<f32>(), vec![1.0, 9.0, 3.0, 4.0, 5.0, 6.0]);
         assert!(matches!(
             x.get(&[2, 0]),
             Err(TensorError::IndexOutOfBounds { axis: 0, .. })
@@ -306,6 +360,14 @@ mod tests {
             x.get(&[0]),
             Err(TensorError::IndexRankMismatch { .. })
         ));
+
+        let ints = Tensor::from_vec(vec![1i64, 2], &[2]).unwrap();
+        ints.set(&[0], 7.9).unwrap();
+        assert_eq!(
+            ints.get(&[0]).unwrap(),
+            Scalar::Int(7),
+            "converted to the dtype"
+        );
     }
 
     #[test]
@@ -313,7 +375,7 @@ mod tests {
         let x = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
         let flat = Tensor::from_parts(x.storage.clone(), vec![4], vec![1], 0);
         flat.set(&[3], 40.0).unwrap();
-        assert_eq!(x.get(&[1, 1]).unwrap(), 40.0);
+        assert_eq!(x.get(&[1, 1]).unwrap().to_f64(), 40.0);
         assert!(x.shares_storage(&flat));
         assert!(!x.shares_storage(&x.deep_copy()));
     }
@@ -323,39 +385,90 @@ mod tests {
         // [[1, 2, 3], [4, 5, 6]] viewed transposed as [[1, 4], [2, 5], [3, 6]].
         let x = t(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
         let xt = Tensor::from_parts(x.storage.clone(), vec![3, 2], vec![1, 3], 0);
-        assert_eq!(xt.to_vec(), vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+        assert_eq!(xt.to_vec::<f32>(), vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
         assert!(!xt.is_contiguous());
         assert!(xt.deep_copy().is_contiguous());
 
         // Reversed view via a negative stride.
         let rev = Tensor::from_parts(x.storage.clone(), vec![6], vec![-1], 5);
-        assert_eq!(rev.to_vec(), vec![6.0, 5.0, 4.0, 3.0, 2.0, 1.0]);
+        assert_eq!(rev.to_vec::<f32>(), vec![6.0, 5.0, 4.0, 3.0, 2.0, 1.0]);
     }
 
     #[test]
     fn creation_helpers() {
-        assert_eq!(Tensor::zeros(&[2, 2]).to_vec(), vec![0.0; 4]);
-        assert_eq!(Tensor::ones(&[3]).to_vec(), vec![1.0; 3]);
-        assert_eq!(Tensor::scalar(7.0).item().unwrap(), 7.0);
         assert_eq!(
-            Tensor::arange(0.0, 1.0, 0.25).unwrap().to_vec(),
-            vec![0.0, 0.25, 0.5, 0.75]
+            Tensor::zeros(&[2, 2], DType::F32).to_vec::<f32>(),
+            vec![0.0; 4]
         );
-        assert_eq!(
-            Tensor::arange(5.0, 0.0, -2.0).unwrap().to_vec(),
-            vec![5.0, 3.0, 1.0]
+        assert_eq!(Tensor::ones(&[3], DType::I64).to_vec::<i64>(), vec![1; 3]);
+        assert_eq!(Tensor::scalar(7.0f32).item().unwrap(), Scalar::Float(7.0));
+        assert!(
+            Tensor::zeros(&[2, 0], DType::F32)
+                .to_vec::<f32>()
+                .is_empty()
         );
-        assert_eq!(Tensor::arange(0.0, -1.0, 1.0).unwrap().numel(), 0);
-        assert!(Tensor::arange(0.0, 1.0, 0.0).is_err());
-        assert!(Tensor::zeros(&[2, 0]).to_vec().is_empty());
     }
 
     #[test]
-    fn display_is_nested() {
+    fn arange_float_and_int() {
+        let f = |a: f64, b: f64, s: f64| {
+            Tensor::arange(a.into(), b.into(), s.into(), DType::F32)
+                .unwrap()
+                .to_vec::<f32>()
+        };
+        assert_eq!(f(0.0, 1.0, 0.25), vec![0.0, 0.25, 0.5, 0.75]);
+        assert_eq!(f(5.0, 0.0, -2.0), vec![5.0, 3.0, 1.0]);
+        assert!(f(0.0, -1.0, 1.0).is_empty());
+        assert!(Tensor::arange(0.0.into(), 1.0.into(), 0.0.into(), DType::F32).is_err());
+
+        let i = |a: i64, b: i64, s: i64| {
+            Tensor::arange(a.into(), b.into(), s.into(), DType::I64)
+                .unwrap()
+                .to_vec::<i64>()
+        };
+        assert_eq!(i(0, 5, 2), vec![0, 2, 4]);
+        assert_eq!(i(5, 0, -2), vec![5, 3, 1]);
+        assert!(i(0, 5, -1).is_empty());
+        assert!(i(3, 3, 1).is_empty());
+        // Exact near the edge of the range, where f64 would lose precision.
+        assert_eq!(
+            i(i64::MAX - 2, i64::MAX, 1),
+            vec![i64::MAX - 2, i64::MAX - 1]
+        );
+    }
+
+    #[test]
+    fn to_dtype_converts_or_shares() {
+        let x = t(&[1.5, -2.5, 0.0], &[3]);
+        assert!(x.to_dtype(DType::F32).shares_storage(&x));
+        let ints = x.to_dtype(DType::I32);
+        assert_eq!(ints.to_vec::<i32>(), vec![1, -2, 0]);
+        assert_eq!(
+            x.to_dtype(DType::Bool).to_vec::<bool>(),
+            vec![true, true, false]
+        );
+    }
+
+    #[test]
+    fn display_shows_values_and_non_default_dtypes() {
         assert_eq!(
             t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]).to_string(),
             "tensor([[1.0, 2.0], [3.0, 4.0]])"
         );
-        assert_eq!(Tensor::scalar(2.5).to_string(), "tensor(2.5)");
+        assert_eq!(Tensor::scalar(2.5f32).to_string(), "tensor(2.5)");
+        assert_eq!(
+            Tensor::from_vec(vec![1i64, 2], &[2]).unwrap().to_string(),
+            "tensor([1, 2])"
+        );
+        assert_eq!(
+            Tensor::from_vec(vec![true, false], &[2])
+                .unwrap()
+                .to_string(),
+            "tensor([True, False])"
+        );
+        assert_eq!(
+            Tensor::from_vec(vec![1i32], &[1]).unwrap().to_string(),
+            "tensor([1], dtype=int32)"
+        );
     }
 }
