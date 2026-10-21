@@ -1,0 +1,516 @@
+{
+  "meta": {
+    "date": "2026-10-20T23:17:35",
+    "python": "3.13.7",
+    "machine": "arm64",
+    "platform": "macOS-15.7.4-arm64-arm-64bit-Mach-O",
+    "numpy": "2.5.4",
+    "tensorsc_debug_build": false
+  },
+  "results": [
+    {
+      "op": "from_list",
+      "size": "small",
+      "library": "tensorsc",
+      "seconds": 1.0546310400241055e-06
+    },
+    {
+      "op": "from_list",
+      "size": "small",
+      "library": "numpy",
+      "seconds": 1.9563541648676618e-06
+    },
+    {
+      "op": "zeros",
+      "size": "small",
+      "library": "tensorsc",
+      "seconds": 2.1317550001549534e-07
+    },
+    {
+      "op": "zeros",
+      "size": "small",
+      "library": "numpy",
+      "seconds": 1.456325204926543e-07
+    },
+    {
+      "op": "add",
+      "size": "small",
+      "library": "tensorsc",
+      "seconds": 6.489749180036597e-07
+    },
+    {
+      "op": "add",
+      "size": "small",
+      "library": "numpy",
+      "seconds": 2.0400354100274852e-07
+    },
+    {
+      "op": "add_broadcast",
+      "size": "small",
+      "library": "tensorsc",
+      "seconds": 6.348138339817524e-07
+    },
+    {
+      "op": "add_broadcast",
+      "size": "small",
+      "library": "numpy",
+      "seconds": 4.4604700000490996e-07
+    },
+    {
+      "op": "mul_scalar",
+      "size": "small",
+      "library": "tensorsc",
+      "seconds": 6.678508339682594e-07
+    },
+    {
+      "op": "mul_scalar",
+      "size": "small",
+      "library": "numpy",
+      "seconds": 3.520392920181621e-07
+    },
+    {
+      "op": "iadd",
+      "size": "small",
+      "library": "tensorsc",
+      "seconds": 6.859164179768413e-07
+    },
+    {
+      "op": "iadd",
+      "size": "small",
+      "library": "numpy",
+      "seconds": 1.8193879148748237e-07
+    },
+    {
+      "op": "exp",
+      "size": "small",
+      "library": "tensorsc",
+      "seconds": 4.408175839926116e-07
+    },
+    {
+      "op": "exp",
+      "size": "small",
+      "library": "numpy",
+      "seconds": 2.962630419933703e-07
+    },
+    {
+      "op": "sigmoid",
+      "size": "small",
+      "library": "tensorsc",
+      "seconds": 4.192977499915287e-07
+    },
+    {
+      "op": "sigmoid",
+      "size": "small",
+      "library": "numpy",
+      "seconds": 1.082943125074962e-06
+    },
+    {
+      "op": "relu",
+      "size": "small",
+      "library": "tensorsc",
+      "seconds": 3.138029590190854e-07
+    },
+    {
+      "op": "relu",
+      "size": "small",
+      "library": "numpy",
+      "seconds": 3.6861525001586414e-07
+    },
+    {
+      "op": "slice_view",
+      "size": "small",
+      "library": "tensorsc",
+      "seconds": 3.748633329814766e-07
+    },
+    {
+      "op": "slice_view",
+      "size": "small",
+      "library": "numpy",
+      "seconds": 1.225371665059356e-07
+    },
+    {
+      "op": "reshape_view",
+      "size": "small",
+      "library": "tensorsc",
+      "seconds": 1.785890625033062e-07
+    },
+    {
+      "op": "reshape_view",
+      "size": "small",
+      "library": "numpy",
+      "seconds": 9.801545839873143e-08
+    },
+    {
+      "op": "transpose_copy",
+      "size": "small",
+      "library": "tensorsc",
+      "seconds": 3.811567499942612e-07
+    },
+    {
+      "op": "transpose_copy",
+      "size": "small",
+      "library": "numpy",
+      "seconds": 2.310262499959208e-07
+    },
+    {
+      "op": "getitem",
+      "size": "small",
+      "library": "tensorsc",
+      "seconds": 1.2874493750859984e-07
+    },
+    {
+      "op": "getitem",
+      "size": "small",
+      "library": "numpy",
+      "seconds": 9.141144999885001e-08
+    },
+    {
+      "op": "tolist",
+      "size": "small",
+      "library": "tensorsc",
+      "seconds": 1.7907931249646936e-06
+    },
+    {
+      "op": "tolist",
+      "size": "small",
+      "library": "numpy",
+      "seconds": 6.293190839933232e-07
+    },
+    {
+      "op": "from_list",
+      "size": "medium",
+      "library": "tensorsc",
+      "seconds": 6.212800839566625e-05
+    },
+    {
+      "op": "from_list",
+      "size": "medium",
+      "library": "numpy",
+      "seconds": 0.00012646118749398737
+    },
+    {
+      "op": "zeros",
+      "size": "medium",
+      "library": "tensorsc",
+      "seconds": 5.873126660007983e-07
+    },
+    {
+      "op": "zeros",
+      "size": "medium",
+      "library": "numpy",
+      "seconds": 5.516765000065788e-07
+    },
+    {
+      "op": "add",
+      "size": "medium",
+      "library": "tensorsc",
+      "seconds": 3.9179950003745035e-05
+    },
+    {
+      "op": "add",
+      "size": "medium",
+      "library": "numpy",
+      "seconds": 8.161919160047546e-07
+    },
+    {
+      "op": "add_broadcast",
+      "size": "medium",
+      "library": "tensorsc",
+      "seconds": 3.8966558300307955e-05
+    },
+    {
+      "op": "add_broadcast",
+      "size": "medium",
+      "library": "numpy",
+      "seconds": 1.6500281250046101e-06
+    },
+    {
+      "op": "mul_scalar",
+      "size": "medium",
+      "library": "tensorsc",
+      "seconds": 3.6890291597228494e-05
+    },
+    {
+      "op": "mul_scalar",
+      "size": "medium",
+      "library": "numpy",
+      "seconds": 8.640733319916763e-07
+    },
+    {
+      "op": "iadd",
+      "size": "medium",
+      "library": "tensorsc",
+      "seconds": 6.145870839827694e-05
+    },
+    {
+      "op": "iadd",
+      "size": "medium",
+      "library": "numpy",
+      "seconds": 6.64223250001669e-07
+    },
+    {
+      "op": "exp",
+      "size": "medium",
+      "library": "tensorsc",
+      "seconds": 3.059805409866385e-05
+    },
+    {
+      "op": "exp",
+      "size": "medium",
+      "library": "numpy",
+      "seconds": 1.2306485399312806e-05
+    },
+    {
+      "op": "sigmoid",
+      "size": "medium",
+      "library": "tensorsc",
+      "seconds": 3.087689579988364e-05
+    },
+    {
+      "op": "sigmoid",
+      "size": "medium",
+      "library": "numpy",
+      "seconds": 1.5181012501125224e-05
+    },
+    {
+      "op": "relu",
+      "size": "medium",
+      "library": "tensorsc",
+      "seconds": 1.951439999975264e-05
+    },
+    {
+      "op": "relu",
+      "size": "medium",
+      "library": "numpy",
+      "seconds": 2.9143879099865444e-06
+    },
+    {
+      "op": "slice_view",
+      "size": "medium",
+      "library": "tensorsc",
+      "seconds": 3.7468929201713765e-07
+    },
+    {
+      "op": "slice_view",
+      "size": "medium",
+      "library": "numpy",
+      "seconds": 1.2620583351235836e-07
+    },
+    {
+      "op": "reshape_view",
+      "size": "medium",
+      "library": "tensorsc",
+      "seconds": 1.8266622901137453e-07
+    },
+    {
+      "op": "reshape_view",
+      "size": "medium",
+      "library": "numpy",
+      "seconds": 1.0052062499744352e-07
+    },
+    {
+      "op": "transpose_copy",
+      "size": "medium",
+      "library": "tensorsc",
+      "seconds": 1.841969999950379e-05
+    },
+    {
+      "op": "transpose_copy",
+      "size": "medium",
+      "library": "numpy",
+      "seconds": 2.7530437501263805e-06
+    },
+    {
+      "op": "getitem",
+      "size": "medium",
+      "library": "tensorsc",
+      "seconds": 1.3112231249397156e-07
+    },
+    {
+      "op": "getitem",
+      "size": "medium",
+      "library": "numpy",
+      "seconds": 9.219492499832995e-08
+    },
+    {
+      "op": "tolist",
+      "size": "medium",
+      "library": "tensorsc",
+      "seconds": 0.0001452809795009671
+    },
+    {
+      "op": "tolist",
+      "size": "medium",
+      "library": "numpy",
+      "seconds": 9.170118340407498e-05
+    },
+    {
+      "op": "from_list",
+      "size": "large",
+      "library": "tensorsc",
+      "seconds": 0.005831510000280105
+    },
+    {
+      "op": "from_list",
+      "size": "large",
+      "library": "numpy",
+      "seconds": 0.012307504149794113
+    },
+    {
+      "op": "zeros",
+      "size": "large",
+      "library": "tensorsc",
+      "seconds": 0.00011243706248933449
+    },
+    {
+      "op": "zeros",
+      "size": "large",
+      "library": "numpy",
+      "seconds": 0.00010981970849388745
+    },
+    {
+      "op": "add",
+      "size": "large",
+      "library": "tensorsc",
+      "seconds": 0.0034001595800509676
+    },
+    {
+      "op": "add",
+      "size": "large",
+      "library": "numpy",
+      "seconds": 0.00019857208299799823
+    },
+    {
+      "op": "add_broadcast",
+      "size": "large",
+      "library": "tensorsc",
+      "seconds": 0.0034517941600643097
+    },
+    {
+      "op": "add_broadcast",
+      "size": "large",
+      "library": "numpy",
+      "seconds": 0.00022500845801550894
+    },
+    {
+      "op": "mul_scalar",
+      "size": "large",
+      "library": "tensorsc",
+      "seconds": 0.003652139579935465
+    },
+    {
+      "op": "mul_scalar",
+      "size": "large",
+      "library": "numpy",
+      "seconds": 0.00016560312500223519
+    },
+    {
+      "op": "iadd",
+      "size": "large",
+      "library": "tensorsc",
+      "seconds": 0.004859812500071712
+    },
+    {
+      "op": "iadd",
+      "size": "large",
+      "library": "numpy",
+      "seconds": 8.077827500528656e-05
+    },
+    {
+      "op": "exp",
+      "size": "large",
+      "library": "tensorsc",
+      "seconds": 0.002840507499931846
+    },
+    {
+      "op": "exp",
+      "size": "large",
+      "library": "numpy",
+      "seconds": 0.0013314439599344042
+    },
+    {
+      "op": "sigmoid",
+      "size": "large",
+      "library": "tensorsc",
+      "seconds": 0.002729074580129236
+    },
+    {
+      "op": "sigmoid",
+      "size": "large",
+      "library": "numpy",
+      "seconds": 0.0018727045849664136
+    },
+    {
+      "op": "relu",
+      "size": "large",
+      "library": "tensorsc",
+      "seconds": 0.0017638212500605732
+    },
+    {
+      "op": "relu",
+      "size": "large",
+      "library": "numpy",
+      "seconds": 0.0003620461670216173
+    },
+    {
+      "op": "slice_view",
+      "size": "large",
+      "library": "tensorsc",
+      "seconds": 3.612244579999242e-07
+    },
+    {
+      "op": "slice_view",
+      "size": "large",
+      "library": "numpy",
+      "seconds": 1.2444108350609894e-07
+    },
+    {
+      "op": "reshape_view",
+      "size": "large",
+      "library": "tensorsc",
+      "seconds": 1.8546991649782285e-07
+    },
+    {
+      "op": "reshape_view",
+      "size": "large",
+      "library": "numpy",
+      "seconds": 1.0138079199532513e-07
+    },
+    {
+      "op": "transpose_copy",
+      "size": "large",
+      "library": "tensorsc",
+      "seconds": 0.0017194270848995075
+    },
+    {
+      "op": "transpose_copy",
+      "size": "large",
+      "library": "numpy",
+      "seconds": 0.0003892490410071332
+    },
+    {
+      "op": "getitem",
+      "size": "large",
+      "library": "tensorsc",
+      "seconds": 1.3492818750091828e-07
+    },
+    {
+      "op": "getitem",
+      "size": "large",
+      "library": "numpy",
+      "seconds": 9.291160000138916e-08
+    },
+    {
+      "op": "tolist",
+      "size": "large",
+      "library": "tensorsc",
+      "seconds": 0.014020054150023498
+    },
+    {
+      "op": "tolist",
+      "size": "large",
+      "library": "numpy",
+      "seconds": 0.010120112501317636
+    }
+  ]
+}

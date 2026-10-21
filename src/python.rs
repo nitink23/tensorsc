@@ -694,6 +694,8 @@ fn broadcast_shapes<'py>(
 #[pymodule]
 fn tensorsc(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTensor>()?;
+    // Lets benchmarks warn when they're timing an unoptimized build.
+    m.add("_debug_build", cfg!(debug_assertions))?;
     m.add_function(wrap_pyfunction!(tensor, m)?)?;
     m.add_function(wrap_pyfunction!(zeros, m)?)?;
     m.add_function(wrap_pyfunction!(ones, m)?)?;

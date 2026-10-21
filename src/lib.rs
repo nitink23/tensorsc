@@ -10,6 +10,7 @@ pub mod dtype;
 pub mod error;
 pub mod ops;
 pub mod storage;
+mod strided;
 pub mod tensor;
 pub mod views;
 

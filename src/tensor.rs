@@ -221,15 +221,6 @@ impl Tensor {
         Ok(self.storage.read()[self.offset])
     }
 
-    /// Sets every element of this view to `value`.
-    pub fn fill(&self, value: f32) {
-        let positions = self.storage_positions();
-        let mut data = self.storage.write();
-        for p in positions {
-            data[p] = value;
-        }
-    }
-
     /// Copies `src` element-by-element into this view. `src` is broadcast to
     /// this view's shape, and a single element is written everywhere.
     /// Safe even when `src` overlaps this view, e.g. `t[0] = t[1]`.
@@ -238,51 +229,12 @@ impl Tensor {
             self.fill(src.item()?);
             return Ok(());
         }
-        let src = src
-            .broadcast_to(&self.shape)
-            .map_err(|_| TensorError::ShapeMismatch {
-                expected: self.shape.clone(),
-                got: src.shape.clone(),
-            })?;
-        // Read everything before taking the write lock: src may share our storage.
-        let values = src.to_vec();
-        let positions = self.storage_positions();
-        let mut data = self.storage.write();
-        for (p, v) in positions.into_iter().zip(values) {
-            data[p] = v;
-        }
-        Ok(())
-    }
-
-    /// Storage positions of every element, in logical row-major order.
-    pub(crate) fn storage_positions(&self) -> Vec<usize> {
-        let numel = self.numel();
-        let mut positions = Vec::with_capacity(numel);
-        let mut index = vec![0usize; self.ndim()];
-        let mut pos = self.offset as isize;
-        for _ in 0..numel {
-            positions.push(pos as usize);
-            // Advance like an odometer: bump the last axis, carry into earlier ones.
-            for axis in (0..self.ndim()).rev() {
-                index[axis] += 1;
-                pos += self.strides[axis];
-                if index[axis] < self.shape[axis] {
-                    break;
-                }
-                pos -= self.strides[axis] * self.shape[axis] as isize;
-                index[axis] = 0;
-            }
-        }
-        positions
+        self.zip_map_assign(src, |_, y| y)
     }
 
     /// All elements in logical row-major order, regardless of memory layout.
     pub fn to_vec(&self) -> Vec<f32> {
-        let data = self.storage.read();
-        self.storage_positions()
-            .into_iter()
-            .map(|p| data[p])
-            .collect()
+        self.map_to_vec(|x| x)
     }
 }
 

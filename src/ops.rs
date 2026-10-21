@@ -6,9 +6,24 @@
 //! instead of being copied.
 
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
+use std::sync::Arc;
 
 use crate::error::{Result, TensorError};
+use crate::strided::{for_each_row, positions};
 use crate::tensor::Tensor;
+
+/// Runs `f` with read access to both tensors' buffers. When they share
+/// storage it takes the lock once: read-locking the same `RwLock` twice from
+/// one thread may deadlock or panic.
+fn read_both<R>(a: &Tensor, b: &Tensor, f: impl FnOnce(&[f32], &[f32]) -> R) -> R {
+    if a.shares_storage(b) {
+        let data = a.storage.read();
+        f(&data, &data)
+    } else {
+        let (da, db) = (a.storage.read(), b.storage.read());
+        f(&da, &db)
+    }
+}
 
 /// The shape two tensors broadcast to, e.g. `[3, 1]` and `[4]` give `[3, 4]`.
 pub fn broadcast_shapes(a: &[usize], b: &[usize]) -> Result<Vec<usize>> {
@@ -100,36 +115,138 @@ impl Tensor {
 
     /// A new tensor with `f` applied to every element.
     pub fn map(&self, f: impl Fn(f32) -> f32) -> Tensor {
-        let data = self.to_vec().into_iter().map(f).collect();
-        Tensor::from_vec(data, &self.shape).expect("length matches shape")
+        Tensor::from_vec(self.map_to_vec(f), &self.shape).expect("length matches shape")
+    }
+
+    /// `f` applied to every element, in logical row-major order.
+    pub(crate) fn map_to_vec(&self, f: impl Fn(f32) -> f32) -> Vec<f32> {
+        let data = self.storage.read();
+        let mut out = Vec::with_capacity(self.numel());
+        for_each_row(
+            &self.shape,
+            [&self.strides],
+            [self.offset],
+            |[p], len, [s]| match s {
+                1 => out.extend(data[p..p + len].iter().map(|&x| f(x))),
+                _ => out.extend(positions(p, len, s).map(|i| f(data[i]))),
+            },
+        );
+        out
+    }
+
+    /// Sets every element of this view to `value`.
+    pub fn fill(&self, value: f32) {
+        let mut data = self.storage.write();
+        for_each_row(
+            &self.shape,
+            [&self.strides],
+            [self.offset],
+            |[p], len, [s]| match s {
+                1 => data[p..p + len].fill(value),
+                _ => positions(p, len, s).for_each(|i| data[i] = value),
+            },
+        );
     }
 
     /// A new tensor combining `self` and `other` elementwise after broadcasting.
     pub fn zip_map(&self, other: &Tensor, f: impl Fn(f32, f32) -> f32) -> Result<Tensor> {
         let shape = broadcast_shapes(&self.shape, &other.shape)?;
-        let a = self.broadcast_to(&shape)?.to_vec();
-        let b = other.broadcast_to(&shape)?.to_vec();
-        let data = a.into_iter().zip(b).map(|(x, y)| f(x, y)).collect();
-        Tensor::from_vec(data, &shape)
+        let a = self.broadcast_to(&shape)?;
+        let b = other.broadcast_to(&shape)?;
+        let mut out = Vec::with_capacity(a.numel());
+        read_both(&a, &b, |da, db| {
+            for_each_row(
+                &shape,
+                [&a.strides, &b.strides],
+                [a.offset, b.offset],
+                |[pa, pb], len, [sa, sb]| match (sa, sb) {
+                    (1, 1) => out.extend(
+                        da[pa..pa + len]
+                            .iter()
+                            .zip(&db[pb..pb + len])
+                            .map(|(&x, &y)| f(x, y)),
+                    ),
+                    // A broadcast scalar on one side, e.g. `a * 2`.
+                    (1, 0) => {
+                        let y = db[pb];
+                        out.extend(da[pa..pa + len].iter().map(|&x| f(x, y)));
+                    }
+                    (0, 1) => {
+                        let x = da[pa];
+                        out.extend(db[pb..pb + len].iter().map(|&y| f(x, y)));
+                    }
+                    _ => out.extend(
+                        positions(pa, len, sa)
+                            .zip(positions(pb, len, sb))
+                            .map(|(i, j)| f(da[i], db[j])),
+                    ),
+                },
+            )
+        });
+        Tensor::from_vec(out, &shape)
     }
 
     /// In-place [`Tensor::zip_map`]: writes `f(self, other)` back through this
     /// view. `other` must broadcast to this tensor's shape (not the reverse).
     pub fn zip_map_assign(&self, other: &Tensor, f: impl Fn(f32, f32) -> f32) -> Result<()> {
+        if self
+            .shape
+            .iter()
+            .zip(&self.strides)
+            .any(|(&dim, &stride)| dim > 1 && stride == 0)
+        {
+            return Err(TensorError::InvalidArgument(
+                "cannot write in place to an expanded tensor: several of its elements \
+                 share one memory location (call .contiguous() first)"
+                    .into(),
+            ));
+        }
         let b = other
             .broadcast_to(&self.shape)
             .map_err(|_| TensorError::ShapeMismatch {
                 expected: self.shape.clone(),
                 got: other.shape.clone(),
-            })?
-            .to_vec();
-        // Read both sides before taking the write lock: they may share storage.
-        let a = self.to_vec();
-        let positions = self.storage_positions();
-        let mut data = self.storage.write();
-        for ((p, x), y) in positions.into_iter().zip(a).zip(b) {
-            data[p] = f(x, y);
+            })?;
+        if self.shares_storage(&b) {
+            // Writing while reading the same buffer could read values that were
+            // already overwritten (`a[1:] += a[:-1]`), so work from a copy, as
+            // NumPy does.
+            return self.zip_map_assign(&b.deep_copy(), f);
         }
+        // Lock in a fixed (address) order so that `a += b` and `b += a` running
+        // on two threads can't deadlock.
+        let mut dst;
+        let src;
+        if Arc::as_ptr(&self.storage) < Arc::as_ptr(&b.storage) {
+            dst = self.storage.write();
+            src = b.storage.read();
+        } else {
+            src = b.storage.read();
+            dst = self.storage.write();
+        }
+        for_each_row(
+            &self.shape,
+            [&self.strides, &b.strides],
+            [self.offset, b.offset],
+            |[pa, pb], len, [sa, sb]| match (sa, sb) {
+                (1, 1) => {
+                    for (x, &y) in dst[pa..pa + len].iter_mut().zip(&src[pb..pb + len]) {
+                        *x = f(*x, y);
+                    }
+                }
+                (1, 0) => {
+                    let y = src[pb];
+                    for x in &mut dst[pa..pa + len] {
+                        *x = f(*x, y);
+                    }
+                }
+                _ => {
+                    for (i, j) in positions(pa, len, sa).zip(positions(pb, len, sb)) {
+                        dst[i] = f(dst[i], src[j]);
+                    }
+                }
+            },
+        );
         Ok(())
     }
 
@@ -470,5 +587,173 @@ mod tests {
         x.copy_from(&t(&[1.0, 2.0, 3.0], &[3])).unwrap();
         assert_eq!(x.to_vec(), vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0]);
         assert!(x.copy_from(&t(&[1.0, 2.0], &[2])).is_err());
+    }
+
+    /// Reads every element with `get`, one index at a time: slow but obviously right.
+    fn reference_to_vec(x: &Tensor) -> Vec<f32> {
+        let mut out = Vec::new();
+        let mut index = vec![0usize; x.ndim()];
+        for _ in 0..x.numel() {
+            out.push(x.get(&index).unwrap());
+            for axis in (0..x.ndim()).rev() {
+                index[axis] += 1;
+                if index[axis] < x.shape()[axis] {
+                    break;
+                }
+                index[axis] = 0;
+            }
+        }
+        out
+    }
+
+    /// Same-shape [2, 3, 4] views of one buffer, covering the layouts the
+    /// strided walk has to handle.
+    fn awkward_layouts() -> Vec<(&'static str, Tensor)> {
+        let base = Tensor::arange(0.0, 24.0, 1.0)
+            .unwrap()
+            .reshape(&[2, 3, 4])
+            .unwrap();
+        let big = Tensor::arange(0.0, 96.0, 1.0)
+            .unwrap()
+            .reshape(&[4, 6, 4])
+            .unwrap();
+        vec![
+            ("contiguous", base.shallow_clone()),
+            (
+                "permuted",
+                Tensor::arange(0.0, 24.0, 1.0)
+                    .unwrap()
+                    .reshape(&[3, 4, 2])
+                    .unwrap()
+                    .permute(&[2, 0, 1])
+                    .unwrap(),
+            ),
+            ("reversed axis", base.slice(1, None, None, -1).unwrap()),
+            (
+                "fully reversed",
+                Tensor::arange(0.0, 24.0, 1.0)
+                    .unwrap()
+                    .slice(0, None, None, -1)
+                    .unwrap()
+                    .view(&[2, 3, 4])
+                    .unwrap(),
+            ),
+            (
+                "strided slices",
+                big.slice(0, None, None, 2)
+                    .unwrap()
+                    .slice(1, Some(1), None, 2)
+                    .unwrap(),
+            ),
+            (
+                "broadcast column",
+                base.select(2, 1)
+                    .unwrap()
+                    .unsqueeze(-1)
+                    .unwrap()
+                    .expand(&[2, 3, 4])
+                    .unwrap(),
+            ),
+            (
+                "broadcast scalar",
+                Tensor::scalar(7.0).expand(&[2, 3, 4]).unwrap(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn strided_reads_match_reference() {
+        for (name, x) in awkward_layouts() {
+            assert_eq!(x.to_vec(), reference_to_vec(&x), "{name}");
+        }
+        assert_eq!(Tensor::scalar(3.0).to_vec(), vec![3.0]);
+        assert!(Tensor::zeros(&[3, 0, 2]).to_vec().is_empty());
+    }
+
+    #[test]
+    fn binary_ops_match_reference_for_every_layout_pair() {
+        for (a_name, a) in awkward_layouts() {
+            for (b_name, b) in awkward_layouts() {
+                let expected: Vec<f32> = reference_to_vec(&a)
+                    .into_iter()
+                    .zip(reference_to_vec(&b))
+                    .map(|(x, y)| x * 100.0 - y)
+                    .collect();
+                let got = a.zip_map(&b, |x, y| x * 100.0 - y).unwrap();
+                assert_eq!(got.to_vec(), expected, "{a_name} op {b_name}");
+            }
+        }
+    }
+
+    #[test]
+    fn in_place_ops_match_reference_for_every_layout_pair() {
+        let count = awkward_layouts().len();
+        for i in 0..count {
+            for (b_name, b) in awkward_layouts() {
+                // Each call builds fresh buffers, so every case writes through
+                // its own (possibly strided) destination view.
+                let (a_name, a) = awkward_layouts().swap_remove(i);
+                let expected: Vec<f32> = reference_to_vec(&a)
+                    .into_iter()
+                    .zip(reference_to_vec(&b))
+                    .map(|(x, y)| x - 2.0 * y)
+                    .collect();
+                let result = a.zip_map_assign(&b, |x, y| x - 2.0 * y);
+                if a_name.starts_with("broadcast") {
+                    assert!(result.is_err(), "{a_name} -= {b_name} should be rejected");
+                } else {
+                    result.unwrap();
+                    assert_eq!(a.to_vec(), expected, "{a_name} -= {b_name}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ops_on_shared_storage() {
+        let a = t(&[1.0, 2.0, 3.0, 4.0], &[4]);
+        // Both operands read the same lock.
+        assert_eq!(a.add(&a).unwrap().to_vec(), vec![2.0, 4.0, 6.0, 8.0]);
+        assert_eq!(
+            a.mul(&a.slice(0, None, None, -1).unwrap())
+                .unwrap()
+                .to_vec(),
+            vec![4.0, 6.0, 6.0, 4.0]
+        );
+        // Shifted overlap reads the original values, like NumPy.
+        let dst = a.slice(0, Some(1), None, 1).unwrap();
+        dst.add_(&a.slice(0, None, Some(-1), 1).unwrap()).unwrap();
+        assert_eq!(a.to_vec(), vec![1.0, 3.0, 5.0, 7.0]);
+        a.add_(&a).unwrap();
+        assert_eq!(a.to_vec(), vec![2.0, 6.0, 10.0, 14.0]);
+    }
+
+    #[test]
+    fn writing_into_an_expanded_tensor_is_an_error() {
+        let x = t(&[1.0, 2.0], &[2, 1]);
+        let e = x.expand(&[2, 3]).unwrap();
+        assert!(matches!(
+            e.add_(&Tensor::scalar(1.0)),
+            Err(TensorError::InvalidArgument(_))
+        ));
+        assert!(e.copy_from(&Tensor::zeros(&[2, 3])).is_err());
+        assert_eq!(x.to_vec(), vec![1.0, 2.0], "nothing was written");
+        // A length-1 axis with stride 0 (from None/unsqueeze) is fine.
+        let row = Tensor::zeros(&[3])
+            .index(&[crate::TensorIndex::NewAxis])
+            .unwrap();
+        row.add_(&Tensor::scalar(1.0)).unwrap();
+        assert_eq!(row.to_vec(), vec![1.0; 3]);
+    }
+
+    #[test]
+    fn fill_through_strided_views() {
+        let x = Tensor::zeros(&[3, 4]);
+        x.slice(1, None, None, -2).unwrap().fill(1.0);
+        x.select(0, 0).unwrap().fill(2.0);
+        assert_eq!(
+            x.to_vec(),
+            vec![2.0, 2.0, 2.0, 2.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]
+        );
     }
 }
