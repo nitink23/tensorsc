@@ -12,11 +12,26 @@ pub enum TensorError {
         expected: usize,
         got: usize,
     },
+    /// More axes were indexed than the tensor has.
+    TooManyIndices {
+        ndim: usize,
+        got: usize,
+    },
     /// One coordinate of an index is past the end of its axis.
     IndexOutOfBounds {
         axis: usize,
-        index: usize,
+        index: isize,
         size: usize,
+    },
+    /// An axis (dimension) argument doesn't exist on the tensor.
+    AxisOutOfRange {
+        axis: isize,
+        ndim: usize,
+    },
+    /// Two tensors needed the same shape and didn't have it.
+    ShapeMismatch {
+        expected: Vec<usize>,
+        got: Vec<usize>,
     },
     InvalidArgument(String),
 }
@@ -36,11 +51,26 @@ impl fmt::Display for TensorError {
             TensorError::IndexRankMismatch { expected, got } => {
                 write!(f, "expected {expected} indices, got {got}")
             }
+            TensorError::TooManyIndices { ndim, got } => {
+                write!(
+                    f,
+                    "too many indices: tensor is {ndim}-dimensional, but {got} were indexed"
+                )
+            }
             TensorError::IndexOutOfBounds { axis, index, size } => {
                 write!(
                     f,
                     "index {index} is out of bounds for axis {axis} with size {size}"
                 )
+            }
+            TensorError::AxisOutOfRange { axis, ndim } => {
+                write!(
+                    f,
+                    "axis {axis} is out of range for a {ndim}-dimensional tensor"
+                )
+            }
+            TensorError::ShapeMismatch { expected, got } => {
+                write!(f, "shape mismatch: expected {expected:?}, got {got:?}")
             }
             TensorError::InvalidArgument(msg) => f.write_str(msg),
         }

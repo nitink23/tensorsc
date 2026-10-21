@@ -11,15 +11,15 @@ use crate::storage::Storage;
 /// The element at index `[i0, i1, ...]` lives at storage position
 /// `offset + i0 * strides[0] + i1 * strides[1] + ...`. Changing shape, strides
 /// and offset (without touching the buffer) is how reshape, transpose and
-/// slicing will avoid copying data. Strides are signed so reversed views
-/// (`t[::-1]`) can be expressed too.
+/// slicing avoid copying data; see `views.rs`. Strides are signed so reversed
+/// views (`t[::-1]`) can be expressed too.
 #[derive(Debug)]
 pub struct Tensor {
-    storage: Arc<Storage>,
-    shape: Vec<usize>,
-    strides: Vec<isize>,
-    offset: usize,
-    dtype: DType,
+    pub(crate) storage: Arc<Storage>,
+    pub(crate) shape: Vec<usize>,
+    pub(crate) strides: Vec<isize>,
+    pub(crate) offset: usize,
+    pub(crate) dtype: DType,
 }
 
 /// Row-major strides: the last axis is contiguous in memory.
@@ -67,6 +67,23 @@ impl Tensor {
             strides,
             offset,
             dtype: DType::F32,
+        }
+    }
+
+    /// Another view onto this tensor's storage with a different layout.
+    pub(crate) fn with_layout(
+        &self,
+        shape: Vec<usize>,
+        strides: Vec<isize>,
+        offset: usize,
+    ) -> Tensor {
+        debug_assert_eq!(shape.len(), strides.len());
+        Tensor {
+            storage: Arc::clone(&self.storage),
+            shape,
+            strides,
+            offset,
+            dtype: self.dtype,
         }
     }
 
@@ -166,7 +183,7 @@ impl Tensor {
             if i >= size {
                 return Err(TensorError::IndexOutOfBounds {
                     axis,
-                    index: i,
+                    index: i as isize,
                     size,
                 });
             }
@@ -199,8 +216,41 @@ impl Tensor {
         Ok(self.storage.read()[self.offset])
     }
 
+    /// Sets every element of this view to `value`.
+    pub fn fill(&self, value: f32) {
+        let positions = self.storage_positions();
+        let mut data = self.storage.write();
+        for p in positions {
+            data[p] = value;
+        }
+    }
+
+    /// Copies `src` element-by-element into this view. `src` must have the same
+    /// shape, or hold a single element (which is then written everywhere).
+    /// Safe even when `src` overlaps this view, e.g. `t[0] = t[1]`.
+    pub fn copy_from(&self, src: &Tensor) -> Result<()> {
+        if src.shape != self.shape {
+            if src.numel() == 1 {
+                self.fill(src.item()?);
+                return Ok(());
+            }
+            return Err(TensorError::ShapeMismatch {
+                expected: self.shape.clone(),
+                got: src.shape.clone(),
+            });
+        }
+        // Read everything before taking the write lock: src may share our storage.
+        let values = src.to_vec();
+        let positions = self.storage_positions();
+        let mut data = self.storage.write();
+        for (p, v) in positions.into_iter().zip(values) {
+            data[p] = v;
+        }
+        Ok(())
+    }
+
     /// Storage positions of every element, in logical row-major order.
-    fn storage_positions(&self) -> Vec<usize> {
+    pub(crate) fn storage_positions(&self) -> Vec<usize> {
         let numel = self.numel();
         let mut positions = Vec::with_capacity(numel);
         let mut index = vec![0usize; self.ndim()];

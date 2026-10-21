@@ -10,6 +10,7 @@ pub mod dtype;
 pub mod error;
 pub mod storage;
 pub mod tensor;
+pub mod views;
 
 #[cfg(feature = "python")]
 mod python;
@@ -19,3 +20,4 @@ pub use dtype::DType;
 pub use error::{Result, TensorError};
 pub use storage::Storage;
 pub use tensor::Tensor;
+pub use views::TensorIndex;

@@ -55,8 +55,10 @@ def test_indexing():
     assert t[0, 0] == 10.0
     with pytest.raises(IndexError):
         t[2, 0]
-    with pytest.raises(IndexError, match="expected 2 indices"):
-        t[0]
+    with pytest.raises(IndexError, match="too many indices"):
+        t[0, 0, 0]
+    with pytest.raises(TypeError):
+        t["a"]
     assert ts.tensor([5, 6])[1] == 6.0
 
 

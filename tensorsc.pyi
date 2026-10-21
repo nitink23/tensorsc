@@ -1,11 +1,15 @@
-from typing import Sequence, Union
+from types import EllipsisType
+from typing import Iterator, Sequence, Union, overload
 
 _Nested = Union[float, int, Sequence["_Nested"]]
-_Index = Union[int, tuple[int, ...]]
+_IndexItem = Union[int, slice, None, EllipsisType]
+_Index = Union[_IndexItem, tuple[_IndexItem, ...]]
 _Shape = Union[int, Sequence[int]]
 
 class Tensor:
     def __init__(self, data: Union[_Nested, "Tensor"]) -> None: ...
+
+    # metadata
     @property
     def shape(self) -> tuple[int, ...]: ...
     @property
@@ -18,16 +22,46 @@ class Tensor:
     @property
     def device(self) -> str: ...
     def numel(self) -> int: ...
+    def storage_offset(self) -> int:
+        """Where this view starts in its storage, in elements."""
     def is_contiguous(self) -> bool: ...
     def shares_memory(self, other: Tensor) -> bool:
         """True when both tensors read and write the same memory."""
+
+    # copies
     def clone(self) -> Tensor: ...
     def copy(self) -> Tensor: ...
+    def contiguous(self) -> Tensor:
+        """This tensor if already contiguous, otherwise a contiguous copy."""
+
+    # views (no data is copied unless noted)
+    def view(self, *shape: _Shape) -> Tensor:
+        """New shape (one dim may be -1). Raises if the layout doesn't allow a view."""
+    def reshape(self, *shape: _Shape) -> Tensor:
+        """New shape (one dim may be -1). A view when possible, otherwise a copy."""
+    def flatten(self, start_dim: int = 0, end_dim: int = -1) -> Tensor: ...
+    def permute(self, *dims: _Shape) -> Tensor: ...
+    @overload
+    def transpose(self) -> Tensor:
+        """Reverse all axes."""
+    @overload
+    def transpose(self, dim0: int, dim1: int) -> Tensor:
+        """Swap two axes."""
+    @property
+    def T(self) -> Tensor:
+        """All axes reversed."""
+    def squeeze(self, dim: int | None = None) -> Tensor: ...
+    def unsqueeze(self, dim: int) -> Tensor: ...
+
+    # elements
     def item(self) -> float: ...
     def tolist(self) -> _Nested: ...
     def __len__(self) -> int: ...
-    def __getitem__(self, key: _Index) -> float: ...
-    def __setitem__(self, key: _Index, value: float) -> None: ...
+    def __iter__(self) -> Iterator[Union[Tensor, float]]: ...
+    def __getitem__(self, key: _Index) -> Union[Tensor, float]:
+        """A float when every axis gets an integer, otherwise a view."""
+    def __setitem__(self, key: _Index, value: Union[float, Tensor, _Nested]) -> None:
+        """Writes through the indexed view."""
     def __float__(self) -> float: ...
 
 def tensor(data: Union[_Nested, Tensor]) -> Tensor: ...
