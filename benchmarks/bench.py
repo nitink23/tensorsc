@@ -71,6 +71,14 @@ BENCHMARKS = {
     # element access and conversion
     "getitem": both(lambda x: x.a[x.i, x.j]),
     "tolist": both(lambda x: x.a.tolist()),
+    # reductions (NumPy accepts the same `axis` spelling)
+    "sum": both(lambda x: x.a.sum()),
+    "sum_axis0": both(lambda x: x.a.sum(axis=0)),
+    "sum_axis1": both(lambda x: x.a.sum(axis=1)),
+    "max": both(lambda x: x.a.max()),
+    "argmax": both(lambda x: x.a.argmax()),
+    # linear algebra (NumPy calls an optimized BLAS here)
+    "matmul": both(lambda x: x.a @ x.b),
 }
 
 LIBRARIES = ("tensorsc", "numpy")
@@ -120,7 +128,9 @@ def close(x, y):
             and len(x) == len(y)
             and all(close(a, b) for a, b in zip(x, y))
         )
-    return math.isclose(x, y, rel_tol=1e-5, abs_tol=1e-6)
+    # Loose enough for different summation orders (NumPy sums float32
+    # pairwise, tensorsc in float64), far tighter than any real bug.
+    return math.isclose(x, y, rel_tol=1e-4, abs_tol=1e-3)
 
 
 def measure(fn, inputs, repeat):

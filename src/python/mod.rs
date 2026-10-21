@@ -9,11 +9,12 @@ use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
 use crate::dtype::{DType, Scalar};
+use crate::python::convert::parse_reduce_axis;
 use crate::python::convert::{
     PyDType, operands, parse_optional_dtype, parse_shape, parse_shape_arg, require_operand,
     scalar_from_py, tensor_from_object, type_name,
 };
-use crate::python::pytensor::{PyTensor, clamp_impl};
+use crate::python::pytensor::{PyTensor, clamp_impl, reduce_with};
 use crate::tensor::Tensor;
 
 // ---- creation ----
@@ -194,6 +195,57 @@ fn broadcast_shapes<'py>(
     PyTuple::new(py, out)
 }
 
+// ---- reductions and linear algebra ----
+
+macro_rules! reduce_functions {
+    ($($name:ident),* $(,)?) => {
+        $(
+            #[pyfunction]
+            #[pyo3(signature = (x, dim=None, keepdim=false, *, axis=None, keepdims=None))]
+            fn $name(
+                x: &Bound<'_, PyAny>,
+                dim: Option<&Bound<'_, PyAny>>,
+                keepdim: bool,
+                axis: Option<&Bound<'_, PyAny>>,
+                keepdims: Option<bool>,
+            ) -> PyResult<PyTensor> {
+                let x = require_operand(x, DType::DEFAULT_FLOAT)?;
+                reduce_with(&x, Tensor::$name, dim, keepdim, axis, keepdims)
+            }
+        )*
+    };
+}
+
+reduce_functions!(sum, prod, mean, max, min, all, any);
+
+macro_rules! arg_functions {
+    ($($name:ident),* $(,)?) => {
+        $(
+            #[pyfunction]
+            #[pyo3(signature = (x, dim=None, keepdim=false, *, axis=None, keepdims=None))]
+            fn $name(
+                x: &Bound<'_, PyAny>,
+                dim: Option<&Bound<'_, PyAny>>,
+                keepdim: bool,
+                axis: Option<&Bound<'_, PyAny>>,
+                keepdims: Option<bool>,
+            ) -> PyResult<PyTensor> {
+                let x = require_operand(x, DType::DEFAULT_FLOAT)?;
+                let axis = parse_reduce_axis(dim, axis)?;
+                Ok(x.$name(axis, keepdims.unwrap_or(keepdim))?.into())
+            }
+        )*
+    };
+}
+
+arg_functions!(argmax, argmin);
+
+#[pyfunction]
+fn matmul(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<PyTensor> {
+    let [a, b] = operands([a, b])?;
+    Ok(a.matmul(&b)?.into())
+}
+
 macro_rules! add_functions {
     ($m:expr, $($f:ident),* $(,)?) => {
         $($m.add_function(wrap_pyfunction!($f, $m)?)?;)*
@@ -243,6 +295,16 @@ fn tensorsc(m: &Bound<'_, PyModule>) -> PyResult<()> {
         allclose,
         broadcast_to,
         broadcast_shapes,
+        sum,
+        prod,
+        mean,
+        max,
+        min,
+        all,
+        any,
+        argmax,
+        argmin,
+        matmul,
     );
     Ok(())
 }

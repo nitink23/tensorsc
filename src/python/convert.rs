@@ -529,3 +529,36 @@ pub(crate) fn to_nested<'py, T: ToPython>(
         }
     }
 }
+
+// ---- reduction arguments ----
+
+/// Axes for a reduction, from PyTorch's `dim` or NumPy's `axis` (not both):
+/// `None` (everything), an int, or a sequence of ints.
+pub(crate) fn parse_reduce_axes(
+    dim: Option<&Bound<'_, PyAny>>,
+    axis: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<Vec<isize>>> {
+    let given = match (dim.filter(|d| !d.is_none()), axis.filter(|a| !a.is_none())) {
+        (Some(_), Some(_)) => {
+            return Err(PyTypeError::new_err("pass dim or axis, not both"));
+        }
+        (Some(d), None) | (None, Some(d)) => d,
+        (None, None) => return Ok(None),
+    };
+    match given.extract::<isize>() {
+        Ok(axis) => Ok(Some(vec![axis])),
+        Err(_) => given.extract().map(Some),
+    }
+}
+
+/// A single axis (for `argmax`/`argmin`), from `dim` or `axis`.
+pub(crate) fn parse_reduce_axis(
+    dim: Option<&Bound<'_, PyAny>>,
+    axis: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<isize>> {
+    match parse_reduce_axes(dim, axis)?.as_deref() {
+        None => Ok(None),
+        Some(&[axis]) => Ok(Some(axis)),
+        Some(_) => Err(PyTypeError::new_err("expected a single axis")),
+    }
+}

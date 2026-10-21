@@ -19,7 +19,11 @@ use crate::tensor::Tensor;
 /// Runs `f` with read access to both tensors' elements. When they share
 /// storage it takes the lock once: read-locking the same `RwLock` twice from
 /// one thread may deadlock or panic.
-fn read_both<T: Element, R>(a: &Tensor, b: &Tensor, f: impl FnOnce(&[T], &[T]) -> R) -> R {
+pub(crate) fn read_both<T: Element, R>(
+    a: &Tensor,
+    b: &Tensor,
+    f: impl FnOnce(&[T], &[T]) -> R,
+) -> R {
     if a.shares_storage(b) {
         let data = a.storage.read::<T>();
         return f(&data, &data);

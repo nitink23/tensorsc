@@ -7,8 +7,8 @@ use pyo3::types::{PyIterator, PyList, PyTuple};
 
 use crate::dtype::{DType, with_dtype};
 use crate::python::convert::{
-    Key, PyDType, dtype_to_py, operand, parse_dims, parse_dtype, parse_key, require_operand,
-    scalar_to_py, tensor_from_object, to_nested,
+    Key, PyDType, dtype_to_py, operand, parse_dims, parse_dtype, parse_key, parse_reduce_axes,
+    parse_reduce_axis, require_operand, scalar_to_py, tensor_from_object, to_nested,
 };
 use crate::tensor::Tensor;
 use crate::views::TensorIndex;
@@ -655,6 +655,150 @@ impl PyTensor {
         let other = require_operand(other, self.inner.dtype())?;
         Ok(self.inner.allclose(&other, rtol, atol)?)
     }
+
+    // ---- reductions: `dim`/`keepdim` (PyTorch) or `axis`/`keepdims` (NumPy) ----
+
+    #[pyo3(signature = (dim=None, keepdim=false, *, axis=None, keepdims=None))]
+    fn sum(
+        &self,
+        dim: Option<&Bound<'_, PyAny>>,
+        keepdim: bool,
+        axis: Option<&Bound<'_, PyAny>>,
+        keepdims: Option<bool>,
+    ) -> PyResult<PyTensor> {
+        reduce_with(&self.inner, Tensor::sum, dim, keepdim, axis, keepdims)
+    }
+
+    #[pyo3(signature = (dim=None, keepdim=false, *, axis=None, keepdims=None))]
+    fn prod(
+        &self,
+        dim: Option<&Bound<'_, PyAny>>,
+        keepdim: bool,
+        axis: Option<&Bound<'_, PyAny>>,
+        keepdims: Option<bool>,
+    ) -> PyResult<PyTensor> {
+        reduce_with(&self.inner, Tensor::prod, dim, keepdim, axis, keepdims)
+    }
+
+    #[pyo3(signature = (dim=None, keepdim=false, *, axis=None, keepdims=None))]
+    fn mean(
+        &self,
+        dim: Option<&Bound<'_, PyAny>>,
+        keepdim: bool,
+        axis: Option<&Bound<'_, PyAny>>,
+        keepdims: Option<bool>,
+    ) -> PyResult<PyTensor> {
+        reduce_with(&self.inner, Tensor::mean, dim, keepdim, axis, keepdims)
+    }
+
+    /// The largest values (NumPy's `max`: values only, even with `dim`).
+    #[pyo3(signature = (dim=None, keepdim=false, *, axis=None, keepdims=None))]
+    fn max(
+        &self,
+        dim: Option<&Bound<'_, PyAny>>,
+        keepdim: bool,
+        axis: Option<&Bound<'_, PyAny>>,
+        keepdims: Option<bool>,
+    ) -> PyResult<PyTensor> {
+        reduce_with(&self.inner, Tensor::max, dim, keepdim, axis, keepdims)
+    }
+
+    /// The smallest values (NumPy's `min`: values only, even with `dim`).
+    #[pyo3(signature = (dim=None, keepdim=false, *, axis=None, keepdims=None))]
+    fn min(
+        &self,
+        dim: Option<&Bound<'_, PyAny>>,
+        keepdim: bool,
+        axis: Option<&Bound<'_, PyAny>>,
+        keepdims: Option<bool>,
+    ) -> PyResult<PyTensor> {
+        reduce_with(&self.inner, Tensor::min, dim, keepdim, axis, keepdims)
+    }
+
+    #[pyo3(signature = (dim=None, keepdim=false, *, axis=None, keepdims=None))]
+    fn all(
+        &self,
+        dim: Option<&Bound<'_, PyAny>>,
+        keepdim: bool,
+        axis: Option<&Bound<'_, PyAny>>,
+        keepdims: Option<bool>,
+    ) -> PyResult<PyTensor> {
+        reduce_with(&self.inner, Tensor::all, dim, keepdim, axis, keepdims)
+    }
+
+    #[pyo3(signature = (dim=None, keepdim=false, *, axis=None, keepdims=None))]
+    fn any(
+        &self,
+        dim: Option<&Bound<'_, PyAny>>,
+        keepdim: bool,
+        axis: Option<&Bound<'_, PyAny>>,
+        keepdims: Option<bool>,
+    ) -> PyResult<PyTensor> {
+        reduce_with(&self.inner, Tensor::any, dim, keepdim, axis, keepdims)
+    }
+
+    /// Index of the largest value along `dim`, or into the flattened tensor.
+    #[pyo3(signature = (dim=None, keepdim=false, *, axis=None, keepdims=None))]
+    fn argmax(
+        &self,
+        dim: Option<&Bound<'_, PyAny>>,
+        keepdim: bool,
+        axis: Option<&Bound<'_, PyAny>>,
+        keepdims: Option<bool>,
+    ) -> PyResult<PyTensor> {
+        let axis = parse_reduce_axis(dim, axis)?;
+        Ok(self.inner.argmax(axis, keepdims.unwrap_or(keepdim))?.into())
+    }
+
+    /// Index of the smallest value along `dim`, or into the flattened tensor.
+    #[pyo3(signature = (dim=None, keepdim=false, *, axis=None, keepdims=None))]
+    fn argmin(
+        &self,
+        dim: Option<&Bound<'_, PyAny>>,
+        keepdim: bool,
+        axis: Option<&Bound<'_, PyAny>>,
+        keepdims: Option<bool>,
+    ) -> PyResult<PyTensor> {
+        let axis = parse_reduce_axis(dim, axis)?;
+        Ok(self.inner.argmin(axis, keepdims.unwrap_or(keepdim))?.into())
+    }
+
+    // ---- linear algebra ----
+
+    fn matmul(&self, other: &Bound<'_, PyAny>) -> PyResult<PyTensor> {
+        self.with(other, Tensor::matmul)
+    }
+
+    fn __matmul__<'py>(
+        &self,
+        py: Python<'py>,
+        o: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.binary(py, o, Tensor::matmul, false)
+    }
+
+    fn __rmatmul__<'py>(
+        &self,
+        py: Python<'py>,
+        o: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.binary(py, o, Tensor::matmul, true)
+    }
+}
+
+type ReduceFn = fn(&Tensor, Option<&[isize]>, bool) -> crate::Result<Tensor>;
+
+/// Runs a reduction with PyTorch- or NumPy-style arguments.
+pub(crate) fn reduce_with(
+    x: &Tensor,
+    op: ReduceFn,
+    dim: Option<&Bound<'_, PyAny>>,
+    keepdim: bool,
+    axis: Option<&Bound<'_, PyAny>>,
+    keepdims: Option<bool>,
+) -> PyResult<PyTensor> {
+    let axes = parse_reduce_axes(dim, axis)?;
+    Ok(op(x, axes.as_deref(), keepdims.unwrap_or(keepdim))?.into())
 }
 
 /// `clamp` with bounds given as numbers (taking `x`'s dtype where they fit)
