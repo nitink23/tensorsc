@@ -5,6 +5,7 @@
 //! (`views.rs`) the results are copies, as in NumPy. Masks and index arrays
 //! are read into plain vectors first, so at most one storage lock is held.
 
+use crate::autograd::{Saved, no_grad, record};
 use crate::dtype::{DType, with_dtype};
 use crate::error::{Result, TensorError};
 use crate::strided::{for_each_row, positions};
@@ -48,6 +49,19 @@ impl Tensor {
     /// The elements (or sub-tensors) where `mask` is true, as a copy. `mask`
     /// covers the leading axes; the result has shape `[trues, ...rest]`.
     pub fn index_mask(&self, mask: &Tensor) -> Result<Tensor> {
+        let out = self.index_mask_forward(mask)?;
+        // The gradient goes back to the selected positions.
+        Ok(record(out, [self], "MaskBackward", |_, _| {
+            let (shape, mask) = (self.shape.clone(), Saved::new(mask));
+            Box::new(move |g| {
+                let grad = Tensor::zeros(&shape, g.dtype());
+                grad.index_mask_put(mask.get()?, g)?;
+                Ok(vec![Some(grad)])
+            })
+        }))
+    }
+
+    fn index_mask_forward(&self, mask: &Tensor) -> Result<Tensor> {
         let (flags, count) = self.mask_flags(mask)?;
         let shape = self.masked_shape(mask, count);
         with_dtype!(self.dtype(), T => {
@@ -134,6 +148,19 @@ impl Tensor {
     /// shape replaces that axis: `[2, 5].index_select(1, [[0, 1], [4, 4]])`
     /// has shape `[2, 2, 2]`.
     pub fn index_select(&self, axis: isize, indices: &Tensor) -> Result<Tensor> {
+        let out = no_grad(|| self.index_select_forward(axis, indices))?;
+        // The gradient is added back at the picked positions (twice if picked twice).
+        Ok(record(out, [self], "IndexSelectBackward", |_, _| {
+            let (shape, indices) = (self.shape.clone(), Saved::new(indices));
+            Box::new(move |g| {
+                let grad = Tensor::zeros(&shape, g.dtype());
+                grad.index_add_(axis, indices.get()?, g)?;
+                Ok(vec![Some(grad)])
+            })
+        }))
+    }
+
+    fn index_select_forward(&self, axis: isize, indices: &Tensor) -> Result<Tensor> {
         let axis = normalize_axis(axis, self.ndim())?;
         let picks = self.resolve_indices(axis, indices)?;
         let front = self.axis_to_front(axis);
@@ -160,7 +187,24 @@ impl Tensor {
     /// shape [`Tensor::index_select`] would return. With repeated indices
     /// the last write wins.
     pub fn index_put(&self, axis: isize, indices: &Tensor, values: &Tensor) -> Result<()> {
+        self.index_write(axis, indices, values, false)
+    }
+
+    /// Like [`Tensor::index_put`], but adds into the selected positions, so
+    /// repeated indices accumulate (PyTorch's `index_add_`).
+    pub fn index_add_(&self, axis: isize, indices: &Tensor, values: &Tensor) -> Result<()> {
+        self.index_write(axis, indices, values, true)
+    }
+
+    fn index_write(
+        &self,
+        axis: isize,
+        indices: &Tensor,
+        values: &Tensor,
+        accumulate: bool,
+    ) -> Result<()> {
         self.ensure_writable_elementwise()?;
+        let values = values.to_dtype(self.dtype());
         let axis = normalize_axis(axis, self.ndim())?;
         let picks = self.resolve_indices(axis, indices)?;
         let front = self.axis_to_front(axis);
@@ -188,9 +232,12 @@ impl Tensor {
             .deep_copy()
             .reshape(&rows_shape.iter().map(|&d| d as isize).collect::<Vec<_>>())?;
         for (row, &i) in picks.iter().enumerate() {
-            front
-                .select(0, i as isize)?
-                .copy_from(&rows.select(0, row as isize)?)?;
+            let (dst, src) = (front.select(0, i as isize)?, rows.select(0, row as isize)?);
+            if accumulate {
+                dst.add_(&src)?;
+            } else {
+                dst.copy_from(&src)?;
+            }
         }
         Ok(())
     }
@@ -309,6 +356,14 @@ mod tests {
                 .is_err()
         );
         assert!(x.index_select(2, &ints(&[0], &[1])).is_err());
+    }
+
+    #[test]
+    fn index_add_accumulates_repeats() {
+        let y = Tensor::zeros(&[3], DType::I64);
+        y.index_add_(0, &ints(&[1, 1, 2], &[3]), &ints(&[5, 6, 7], &[3]))
+            .unwrap();
+        assert_eq!(y.to_vec::<i64>(), vec![0, 11, 7]);
     }
 
     #[test]

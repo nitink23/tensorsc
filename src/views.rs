@@ -4,6 +4,7 @@
 //! The one exception is [`Tensor::reshape`], which falls back to a copy when
 //! the requested shape can't be expressed with strides (see [`Tensor::view`]).
 
+use crate::autograd::record;
 use crate::error::{Result, TensorError};
 use crate::tensor::{Tensor, contiguous_strides};
 
@@ -127,6 +128,12 @@ fn infer_shape(numel: usize, shape: &[isize]) -> Result<Vec<usize>> {
     Ok(out)
 }
 
+/// Gradient of a reshape-like view: the output gradient reshaped back.
+fn reshape_back(input: &Tensor) -> impl Fn(&Tensor) -> Result<Tensor> + Send + Sync + 'static {
+    let shape: Vec<isize> = input.shape().iter().map(|&d| d as isize).collect();
+    move |g| g.reshape(&shape)
+}
+
 /// Strides that let `new_shape` walk the same elements as (`shape`, `strides`)
 /// without copying, or `None` if that's impossible.
 ///
@@ -175,7 +182,10 @@ impl Tensor {
             view_strides(&self.shape, &self.strides, &new_shape)
         };
         match strides {
-            Some(strides) => Ok(self.with_layout(new_shape, strides, self.offset)),
+            Some(strides) => {
+                let view = self.with_layout(new_shape, strides, self.offset);
+                Ok(self.record_view(view, "ViewBackward", reshape_back(self)))
+            }
             None => Err(TensorError::InvalidArgument(format!(
                 "view shape {shape:?} is incompatible with this tensor's memory layout; \
                  use reshape (which copies when needed) or call contiguous() first"
@@ -238,7 +248,13 @@ impl Tensor {
             shape.push(self.shape[axis]);
             strides.push(self.strides[axis]);
         }
-        Ok(self.with_layout(shape, strides, self.offset))
+        let view = self.with_layout(shape, strides, self.offset);
+        // Undo it with the inverse permutation.
+        let mut inverse = vec![0isize; dims.len()];
+        for (i, &dim) in dims.iter().enumerate() {
+            inverse[normalize_axis(dim, self.ndim())?] = i as isize;
+        }
+        Ok(self.record_view(view, "PermuteBackward", move |g| g.permute(&inverse)))
     }
 
     /// Swaps two axes.
@@ -249,14 +265,18 @@ impl Tensor {
         let mut strides = self.strides.clone();
         shape.swap(a, b);
         strides.swap(a, b);
-        Ok(self.with_layout(shape, strides, self.offset))
+        let view = self.with_layout(shape, strides, self.offset);
+        Ok(self.record_view(view, "TransposeBackward", move |g| {
+            g.transpose(a as isize, b as isize)
+        }))
     }
 
     /// Reverses the order of all axes (`.T` in Python).
     pub fn reversed_axes(&self) -> Tensor {
         let shape = self.shape.iter().rev().copied().collect();
         let strides = self.strides.iter().rev().copied().collect();
-        self.with_layout(shape, strides, self.offset)
+        let view = self.with_layout(shape, strides, self.offset);
+        self.record_view(view, "TransposeBackward", |g| Ok(g.reversed_axes()))
     }
 
     /// Removes axes of length 1: just `axis` if given (a no-op when that axis
@@ -271,7 +291,8 @@ impl Tensor {
             .filter(|&(i, (&dim, _))| !(dim == 1 && only.is_none_or(|a| a == i)))
             .map(|(_, (&dim, &stride))| (dim, stride))
             .unzip();
-        Ok(self.with_layout(shape, strides, self.offset))
+        let view = self.with_layout(shape, strides, self.offset);
+        Ok(self.record_view(view, "SqueezeBackward", reshape_back(self)))
     }
 
     /// Inserts an axis of length 1 at position `axis` (which may be `ndim`).
@@ -285,7 +306,8 @@ impl Tensor {
         let mut strides = self.strides.clone();
         shape.insert(axis, 1);
         strides.insert(axis, stride);
-        Ok(self.with_layout(shape, strides, self.offset))
+        let view = self.with_layout(shape, strides, self.offset);
+        Ok(self.record_view(view, "UnsqueezeBackward", reshape_back(self)))
     }
 
     /// This tensor if it's already contiguous (sharing storage), otherwise a
@@ -368,7 +390,27 @@ impl Tensor {
         }
         shape.extend_from_slice(&self.shape[axis..]);
         strides.extend_from_slice(&self.strides[axis..]);
-        Ok(self.with_layout(shape, strides, offset as usize))
+        let view = self.with_layout(shape, strides, offset as usize);
+        // The gradient lands in the indexed positions of an otherwise-zero tensor.
+        let (input_shape, items) = (self.shape.clone(), items.to_vec());
+        Ok(self.record_view(view, "IndexBackward", move |g| {
+            let grad = Tensor::zeros(&input_shape, g.dtype());
+            grad.index(&items)?.copy_from(g)?;
+            Ok(grad)
+        }))
+    }
+
+    /// Records a view whose input gradient is `back(output gradient)`. Views
+    /// save no tensors: their gradients only depend on shapes.
+    fn record_view(
+        &self,
+        view: Tensor,
+        name: &'static str,
+        back: impl Fn(&Tensor) -> Result<Tensor> + Send + Sync + 'static,
+    ) -> Tensor {
+        record(view, [self], name, |_, _| {
+            Box::new(move |g| Ok(vec![Some(back(g)?)]))
+        })
     }
 
     /// The sub-tensor at position `index` along `axis` (that axis is removed).

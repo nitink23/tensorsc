@@ -12,9 +12,8 @@
 //! handling is written once per family and every (operation, element type)
 //! pair still compiles to its own tight loop.
 
-use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
-
 use crate::arith::{Bitwise, Float, Numeric, with_bitwise, with_float, with_numeric};
+use crate::autograd::{Saved, constant, fit, no_grad, record, sum_to, when};
 use crate::dtype::{DType, Element, Scalar, with_dtype};
 use crate::error::{Result, TensorError};
 use crate::tensor::Tensor;
@@ -68,6 +67,21 @@ trait BinaryOp {
     fn check<T: Numeric>(_rhs: &Tensor) -> Result<()> {
         Ok(())
     }
+
+    /// Whether gradients flow through this op (and `backward` is defined).
+    const DIFFERENTIABLE: bool = false;
+
+    /// Gradients of `a` and `b` (where `needs` says so), given the gradient
+    /// `g` of the output `out`.
+    fn backward(
+        _a: &Saved,
+        _b: &Saved,
+        _out: &Saved,
+        _g: &Tensor,
+        _needs: [bool; 2],
+    ) -> Result<Vec<Option<Tensor>>> {
+        unreachable!("only called for differentiable ops")
+    }
 }
 
 /// Integer `//` and `%` by zero is an error (float division gives inf/NaN).
@@ -94,6 +108,16 @@ impl BinaryOp for AddOp {
     fn apply<T: Numeric>(a: T, b: T) -> T {
         a.add(b)
     }
+    const DIFFERENTIABLE: bool = true;
+    fn backward(
+        a: &Saved,
+        b: &Saved,
+        _: &Saved,
+        g: &Tensor,
+        n: [bool; 2],
+    ) -> Result<Vec<Option<Tensor>>> {
+        Ok(vec![when(n[0], || fit(g, a))?, when(n[1], || fit(g, b))?])
+    }
 }
 
 impl BinaryOp for SubOp {
@@ -102,6 +126,19 @@ impl BinaryOp for SubOp {
     fn apply<T: Numeric>(a: T, b: T) -> T {
         a.sub(b)
     }
+    const DIFFERENTIABLE: bool = true;
+    fn backward(
+        a: &Saved,
+        b: &Saved,
+        _: &Saved,
+        g: &Tensor,
+        n: [bool; 2],
+    ) -> Result<Vec<Option<Tensor>>> {
+        Ok(vec![
+            when(n[0], || fit(g, a))?,
+            when(n[1], || fit(&g.neg()?, b))?,
+        ])
+    }
 }
 
 impl BinaryOp for MulOp {
@@ -109,6 +146,19 @@ impl BinaryOp for MulOp {
     const ON_BOOL: OnBool = OnBool::Logical(|a, b| a & b);
     fn apply<T: Numeric>(a: T, b: T) -> T {
         a.mul(b)
+    }
+    const DIFFERENTIABLE: bool = true;
+    fn backward(
+        a: &Saved,
+        b: &Saved,
+        _: &Saved,
+        g: &Tensor,
+        n: [bool; 2],
+    ) -> Result<Vec<Option<Tensor>>> {
+        Ok(vec![
+            when(n[0], || fit(&g.mul(b.get()?)?, a))?,
+            when(n[1], || fit(&g.mul(a.get()?)?, b))?,
+        ])
     }
 }
 
@@ -120,6 +170,20 @@ impl BinaryOp for DivOp {
     }
     fn apply<T: Numeric>(a: T, b: T) -> T {
         a.div(b)
+    }
+    const DIFFERENTIABLE: bool = true;
+    /// d(a/b) = da / b - db * (a/b) / b
+    fn backward(
+        a: &Saved,
+        b: &Saved,
+        out: &Saved,
+        g: &Tensor,
+        n: [bool; 2],
+    ) -> Result<Vec<Option<Tensor>>> {
+        Ok(vec![
+            when(n[0], || fit(&g.div(b.get()?)?, a))?,
+            when(n[1], || fit(&g.mul(out.get()?)?.div(b.get()?)?.neg()?, b))?,
+        ])
     }
 }
 
@@ -151,6 +215,29 @@ impl BinaryOp for PowOp {
     fn apply<T: Numeric>(a: T, b: T) -> T {
         a.pow(b)
     }
+    const DIFFERENTIABLE: bool = true;
+    /// d(a^b) = da * b * a^(b-1) + db * a^b * ln(a), with the second term 0
+    /// where `a` is 0 (as in PyTorch), instead of 0 * -inf.
+    fn backward(
+        a: &Saved,
+        b: &Saved,
+        out: &Saved,
+        g: &Tensor,
+        n: [bool; 2],
+    ) -> Result<Vec<Option<Tensor>>> {
+        let (av, bv) = (a.get()?, b.get()?);
+        Ok(vec![
+            when(n[0], || {
+                let lowered = bv.sub(&constant(1.0, bv))?;
+                fit(&g.mul(bv)?.mul(&av.pow(&lowered)?)?, a)
+            })?,
+            when(n[1], || {
+                let term = out.get()?.mul(&av.log())?;
+                let at_zero = av.eq(&constant(0.0, av))?;
+                fit(&g.mul(&where_(&at_zero, &constant(0.0, &term), &term)?)?, b)
+            })?,
+        ])
+    }
     fn check<T: Numeric>(rhs: &Tensor) -> Result<()> {
         if !T::DTYPE.is_float() && rhs.any_element::<T>(|x| x < T::ZERO) {
             return Err(TensorError::InvalidArgument(
@@ -167,6 +254,16 @@ impl BinaryOp for MaximumOp {
     fn apply<T: Numeric>(a: T, b: T) -> T {
         a.maximum(b)
     }
+    const DIFFERENTIABLE: bool = true;
+    fn backward(
+        a: &Saved,
+        b: &Saved,
+        _: &Saved,
+        g: &Tensor,
+        n: [bool; 2],
+    ) -> Result<Vec<Option<Tensor>>> {
+        extreme_backward(a, b, g, n, Tensor::gt)
+    }
 }
 
 impl BinaryOp for MinimumOp {
@@ -175,6 +272,36 @@ impl BinaryOp for MinimumOp {
     fn apply<T: Numeric>(a: T, b: T) -> T {
         a.minimum(b)
     }
+    const DIFFERENTIABLE: bool = true;
+    fn backward(
+        a: &Saved,
+        b: &Saved,
+        _: &Saved,
+        g: &Tensor,
+        n: [bool; 2],
+    ) -> Result<Vec<Option<Tensor>>> {
+        extreme_backward(a, b, g, n, Tensor::lt)
+    }
+}
+
+/// Gradient of `maximum`/`minimum`: it goes to whichever input was picked
+/// (`a_wins` says where `a` was), split evenly on ties, as in PyTorch.
+fn extreme_backward(
+    a: &Saved,
+    b: &Saved,
+    g: &Tensor,
+    n: [bool; 2],
+    a_wins: fn(&Tensor, &Tensor) -> Result<Tensor>,
+) -> Result<Vec<Option<Tensor>>> {
+    let (av, bv) = (a.get()?, b.get()?);
+    let (a_won, b_won, tie) = (a_wins(av, bv)?, a_wins(bv, av)?, av.eq(bv)?);
+    let zero = constant(0.0, g);
+    let half = g.mul(&constant(0.5, g))?;
+    let share = |won: &Tensor| where_(won, g, &where_(&tie, &half, &zero)?);
+    Ok(vec![
+        when(n[0], || fit(&share(&a_won)?, a))?,
+        when(n[1], || fit(&share(&b_won)?, b))?,
+    ])
 }
 
 fn binary_dtype<O: BinaryOp>(a: DType, b: DType) -> Result<DType> {
@@ -260,16 +387,24 @@ impl BitwiseOp for XorOp {
 
 /// Functions that only make sense on floats; integer inputs become floats.
 trait FloatOp {
+    const NAME: &'static str;
     fn apply<T: Float>(x: T) -> T;
+    /// Gradient of the input, given input `x`, output `y` and its gradient `g`.
+    fn backward(x: &Saved, y: &Saved, g: &Tensor) -> Result<Tensor>;
 }
 
 macro_rules! float_ops {
-    ($($Op:ident => |$x:ident| $body:expr;)*) => {
+    ($($Op:ident => |$x:ident| $body:expr, grad |$gx:ident, $gy:ident, $g:ident| $grad:expr;)*) => {
         $(
             struct $Op;
             impl FloatOp for $Op {
+                const NAME: &'static str = stringify!($Op);
                 fn apply<T: Float>($x: T) -> T {
                     $body
+                }
+                #[allow(unused_variables)]
+                fn backward($gx: &Saved, $gy: &Saved, $g: &Tensor) -> Result<Tensor> {
+                    $grad
                 }
             }
         )*
@@ -277,15 +412,21 @@ macro_rules! float_ops {
 }
 
 float_ops! {
-    ExpOp => |x| x.exp();
-    LogOp => |x| x.ln();
-    SqrtOp => |x| x.sqrt();
-    SinOp => |x| x.sin();
-    CosOp => |x| x.cos();
-    TanhOp => |x| x.tanh();
+    ExpOp => |x| x.exp(), grad |x, y, g| g.mul(y.get()?);
+    LogOp => |x| x.ln(), grad |x, y, g| g.div(x.get()?);
+    SqrtOp => |x| x.sqrt(), grad |x, y, g| g.mul(&constant(0.5, g))?.div(y.get()?);
+    SinOp => |x| x.sin(), grad |x, y, g| g.mul(&x.get()?.cos());
+    CosOp => |x| x.cos(), grad |x, y, g| g.mul(&x.get()?.sin())?.neg();
+    TanhOp => |x| x.tanh(), grad |x, y, g| {
+        let y = y.get()?;
+        g.mul(&constant(1.0, y).sub(&y.mul(y)?)?)
+    };
     SigmoidOp => |x| {
         let one = T::from_f64(1.0);
         one.div(one.add(x.neg().exp()))
+    }, grad |x, y, g| {
+        let y = y.get()?;
+        g.mul(y)?.mul(&constant(1.0, y).sub(y)?)
     };
 }
 
@@ -356,7 +497,11 @@ impl Tensor {
                 return Err(bad());
             }
         }
-        Ok(self.with_layout(new_shape, new_strides, self.offset))
+        let view = self.with_layout(new_shape, new_strides, self.offset);
+        Ok(record(view, [self], "ExpandBackward", |_, _| {
+            let shape = self.shape.clone();
+            Box::new(move |g| Ok(vec![Some(sum_to(g, &shape)?)]))
+        }))
     }
 
     /// [`Tensor::expand`] with a concrete shape (NumPy's spelling).
@@ -374,6 +519,17 @@ impl Tensor {
     // ---- arithmetic ----
 
     fn binary<O: BinaryOp>(&self, other: &Tensor) -> Result<Tensor> {
+        let out = no_grad(|| self.binary_forward::<O>(other))?;
+        if !O::DIFFERENTIABLE {
+            return Ok(out);
+        }
+        Ok(record(out, [self, other], O::NAME, |out, needs| {
+            let (a, b, out) = (Saved::new(self), Saved::new(other), Saved::new(out));
+            Box::new(move |g| O::backward(&a, &b, &out, g, needs))
+        }))
+    }
+
+    fn binary_forward<O: BinaryOp>(&self, other: &Tensor) -> Result<Tensor> {
         let dtype = binary_dtype::<O>(self.dtype(), other.dtype())?;
         let (a, b) = (self.to_dtype(dtype), other.to_dtype(dtype));
         with_numeric!(dtype, T => {
@@ -471,7 +627,24 @@ impl Tensor {
     fn float_unary<O: FloatOp>(&self) -> Tensor {
         let dtype = self.dtype().to_float();
         let x = self.to_dtype(dtype);
-        with_float!(dtype, T => x.map_elements::<T, T>(O::apply::<T>))
+        let out = with_float!(dtype, T => x.map_elements::<T, T>(O::apply::<T>));
+        record(out, [self], O::NAME, |out, _| {
+            let (x, y) = (Saved::new(self), Saved::new(out));
+            Box::new(move |g| Ok(vec![Some(fit(&O::backward(&x, &y, g)?, &x)?)]))
+        })
+    }
+
+    /// Records an elementwise op whose gradient is `g * local(x)`.
+    fn record_unary(
+        &self,
+        out: Tensor,
+        name: &'static str,
+        local: fn(&Tensor, &Tensor) -> Result<Tensor>,
+    ) -> Tensor {
+        record(out, [self], name, |_, _| {
+            let x = Saved::new(self);
+            Box::new(move |g| Ok(vec![Some(fit(&local(g, x.get()?)?, &x)?)]))
+        })
     }
 
     fn rounding<O: RoundOp>(&self) -> Tensor {
@@ -483,34 +656,69 @@ impl Tensor {
 
     pub fn neg(&self) -> Result<Tensor> {
         let dtype = self.dtype();
-        with_numeric!(dtype, T => Ok(self.map_elements::<T, T>(<T as Numeric>::neg)), bool => {
-            Err(TensorError::UnsupportedDType { op: "negation (use ~ or logical_not)", dtype })
-        })
+        let out = with_numeric!(dtype, T => self.map_elements::<T, T>(<T as Numeric>::neg), bool => {
+            return Err(TensorError::UnsupportedDType { op: "negation (use ~ or logical_not)", dtype });
+        });
+        Ok(self.record_unary(out, "NegBackward", |g, _| g.neg()))
     }
 
     pub fn abs(&self) -> Tensor {
-        with_numeric!(self.dtype(), T => self.map_elements::<T, T>(<T as Numeric>::abs), bool => self.deep_copy())
+        let out = with_numeric!(self.dtype(), T => self.map_elements::<T, T>(<T as Numeric>::abs), bool => self.deep_copy());
+        // d|x| = sign(x), and 0 at 0 (as in PyTorch).
+        self.record_unary(out, "AbsBackward", |g, x| {
+            let zero = constant(0.0, x);
+            let sign = where_(
+                &x.gt(&zero)?,
+                &constant(1.0, x),
+                &where_(&x.lt(&zero)?, &constant(-1.0, x), &zero)?,
+            )?;
+            g.mul(&sign)
+        })
     }
 
     /// `max(x, 0)`; NaN passes through, as in PyTorch.
     pub fn relu(&self) -> Result<Tensor> {
         let dtype = self.dtype();
-        with_numeric!(dtype, T => Ok(self.map_elements::<T, T>(|x| <T as Numeric>::maximum(x, T::ZERO))), bool => {
-            Err(TensorError::UnsupportedDType { op: "relu", dtype })
-        })
+        let out = with_numeric!(dtype, T => self.map_elements::<T, T>(|x| <T as Numeric>::maximum(x, T::ZERO)), bool => {
+            return Err(TensorError::UnsupportedDType { op: "relu", dtype });
+        });
+        Ok(self.record_unary(out, "ReluBackward", |g, x| {
+            where_(&x.gt(&constant(0.0, x))?, g, &constant(0.0, g))
+        }))
     }
 
     /// Limits elements to `[min, max]`; either bound may be omitted. NaN stays
     /// NaN. Bounds promote like any other operand (`int.clamp(0.5)` is float).
+    /// The gradient passes where `min <= x <= max`; bounds are constants.
     pub fn clamp(&self, min: Option<&Tensor>, max: Option<&Tensor>) -> Result<Tensor> {
-        let mut out = self.shallow_clone();
-        if let Some(min) = min {
-            out = out.maximum(min)?;
-        }
-        if let Some(max) = max {
-            out = out.minimum(max)?;
-        }
-        Ok(out)
+        let out = no_grad(|| -> Result<Tensor> {
+            let mut out = self.shallow_clone();
+            if let Some(min) = min {
+                out = out.maximum(min)?;
+            }
+            if let Some(max) = max {
+                out = out.minimum(max)?;
+            }
+            Ok(out)
+        })?;
+        Ok(record(out, [self], "ClampBackward", |_, _| {
+            let x = Saved::new(self);
+            let (min, max) = (min.map(Saved::new), max.map(Saved::new));
+            Box::new(move |g| {
+                let xv = x.get()?;
+                let mut inside = Tensor::full(xv.shape(), true, DType::Bool);
+                if let Some(min) = &min {
+                    inside = inside.logical_and(&xv.ge(min.get()?)?)?;
+                }
+                if let Some(max) = &max {
+                    inside = inside.logical_and(&xv.le(max.get()?)?)?;
+                }
+                Ok(vec![Some(fit(
+                    &where_(&inside, g, &constant(0.0, g))?,
+                    &x,
+                )?)])
+            })
+        }))
     }
 
     pub fn isnan(&self) -> Tensor {
@@ -546,10 +754,22 @@ impl Tensor {
 /// truthiness; `a` and `b` are promoted to a common dtype.
 pub fn where_(cond: &Tensor, a: &Tensor, b: &Tensor) -> Result<Tensor> {
     let dtype = a.dtype().promote(b.dtype());
-    let (a, b) = (a.to_dtype(dtype), b.to_dtype(dtype));
-    with_dtype!(dtype, T => {
-        Tensor::zip3_map::<T>(&cond.truthy(), &a, &b, |c, x, y| if c { x } else { y })
-    })
+    let out = no_grad(|| {
+        let (x, y) = (a.to_dtype(dtype), b.to_dtype(dtype));
+        with_dtype!(dtype, T => {
+            Tensor::zip3_map::<T>(&cond.truthy(), &x, &y, |c, x, y| if c { x } else { y })
+        })
+    })?;
+    Ok(record(out, [a, b], "WhereBackward", |_, n| {
+        let (cond, a, b) = (Saved::new(cond), Saved::new(a), Saved::new(b));
+        Box::new(move |g| {
+            let (cond, zero) = (cond.get()?, constant(0.0, g));
+            Ok(vec![
+                when(n[0], || fit(&where_(cond, g, &zero)?, &a))?,
+                when(n[1], || fit(&where_(cond, &zero, g)?, &b))?,
+            ])
+        })
+    }))
 }
 
 /// `name(&self, other)` and its in-place `name_` for each arithmetic op.
@@ -637,114 +857,122 @@ bitwise_methods! {
 }
 
 // ---- operator overloading ----
-//
-// `&a + &b`, `a + b`, `&a * 2.0`, `1 - &a`, ... all work. Operators can't
-// return a `Result`, so invalid operations (mismatched shapes, unsupported
-// dtypes) panic; use the named methods (`a.add(&b)?`) to handle those as
-// errors. (If `std::ops::Add` is imported, `a.add(&b)` on an owned tensor
-// picks the trait method; write `Tensor::add(&a, &b)` there.) Rust scalars
-// are 0-d tensors of their own type: `int_tensor * 2.5f32` is float32.
 
-macro_rules! binary_operator {
-    ($Trait:ident, $method:ident, $op:ident, $($scalar:ty),*) => {
-        impl $Trait<&Tensor> for &Tensor {
-            type Output = Tensor;
-            fn $method(self, rhs: &Tensor) -> Tensor {
-                Tensor::$op(self, rhs).unwrap_or_else(|e| panic!("{e}"))
-            }
-        }
+/// The `std::ops` impls live in their own module so that elsewhere in this
+/// file `a.mul(&b)` means the fallible method, not the panicking operator.
+mod operators {
+    use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
-        impl $Trait<Tensor> for Tensor {
-            type Output = Tensor;
-            fn $method(self, rhs: Tensor) -> Tensor {
-                <&Tensor as $Trait<&Tensor>>::$method(&self, &rhs)
-            }
-        }
+    use crate::tensor::Tensor;
+    //
+    // `&a + &b`, `a + b`, `&a * 2.0`, `1 - &a`, ... all work. Operators can't
+    // return a `Result`, so invalid operations (mismatched shapes, unsupported
+    // dtypes) panic; use the named methods (`a.add(&b)?`) to handle those as
+    // errors. (If `std::ops::Add` is imported, `a.add(&b)` on an owned tensor
+    // picks the trait method; write `Tensor::add(&a, &b)` there.) Rust scalars
+    // are 0-d tensors of their own type: `int_tensor * 2.5f32` is float32.
 
-        impl $Trait<&Tensor> for Tensor {
-            type Output = Tensor;
-            fn $method(self, rhs: &Tensor) -> Tensor {
-                <&Tensor as $Trait<&Tensor>>::$method(&self, rhs)
-            }
-        }
-
-        impl $Trait<Tensor> for &Tensor {
-            type Output = Tensor;
-            fn $method(self, rhs: Tensor) -> Tensor {
-                <&Tensor as $Trait<&Tensor>>::$method(self, &rhs)
-            }
-        }
-
-        $(
-            impl $Trait<$scalar> for &Tensor {
-                type Output = Tensor;
-                fn $method(self, rhs: $scalar) -> Tensor {
-                    <&Tensor as $Trait<&Tensor>>::$method(self, &Tensor::scalar(rhs))
-                }
-            }
-
-            impl $Trait<$scalar> for Tensor {
-                type Output = Tensor;
-                fn $method(self, rhs: $scalar) -> Tensor {
-                    <&Tensor as $Trait<&Tensor>>::$method(&self, &Tensor::scalar(rhs))
-                }
-            }
-
-            impl $Trait<&Tensor> for $scalar {
+    macro_rules! binary_operator {
+        ($Trait:ident, $method:ident, $op:ident, $($scalar:ty),*) => {
+            impl $Trait<&Tensor> for &Tensor {
                 type Output = Tensor;
                 fn $method(self, rhs: &Tensor) -> Tensor {
-                    <&Tensor as $Trait<&Tensor>>::$method(&Tensor::scalar(self), rhs)
+                    Tensor::$op(self, rhs).unwrap_or_else(|e| panic!("{e}"))
                 }
             }
 
-            impl $Trait<Tensor> for $scalar {
+            impl $Trait<Tensor> for Tensor {
                 type Output = Tensor;
                 fn $method(self, rhs: Tensor) -> Tensor {
-                    <&Tensor as $Trait<&Tensor>>::$method(&Tensor::scalar(self), &rhs)
+                    <&Tensor as $Trait<&Tensor>>::$method(&self, &rhs)
                 }
             }
-        )*
-    };
-}
 
-binary_operator!(Add, add, add, f32, f64, i64);
-binary_operator!(Sub, sub, sub, f32, f64, i64);
-binary_operator!(Mul, mul, mul, f32, f64, i64);
-binary_operator!(Div, div, div, f32, f64, i64);
-
-macro_rules! assign_operator {
-    ($Trait:ident, $method:ident, $op:ident, $($scalar:ty),*) => {
-        impl $Trait<&Tensor> for Tensor {
-            fn $method(&mut self, rhs: &Tensor) {
-                self.$op(rhs).unwrap_or_else(|e| panic!("{e}"))
+            impl $Trait<&Tensor> for Tensor {
+                type Output = Tensor;
+                fn $method(self, rhs: &Tensor) -> Tensor {
+                    <&Tensor as $Trait<&Tensor>>::$method(&self, rhs)
+                }
             }
-        }
 
-        $(impl $Trait<$scalar> for Tensor {
-            fn $method(&mut self, rhs: $scalar) {
-                self.$op(&Tensor::scalar(rhs))
-                    .unwrap_or_else(|e| panic!("{e}"))
+            impl $Trait<Tensor> for &Tensor {
+                type Output = Tensor;
+                fn $method(self, rhs: Tensor) -> Tensor {
+                    <&Tensor as $Trait<&Tensor>>::$method(self, &rhs)
+                }
             }
-        })*
-    };
-}
 
-assign_operator!(AddAssign, add_assign, add_, f32, f64, i64);
-assign_operator!(SubAssign, sub_assign, sub_, f32, f64, i64);
-assign_operator!(MulAssign, mul_assign, mul_, f32, f64, i64);
-assign_operator!(DivAssign, div_assign, div_, f32, f64, i64);
+            $(
+                impl $Trait<$scalar> for &Tensor {
+                    type Output = Tensor;
+                    fn $method(self, rhs: $scalar) -> Tensor {
+                        <&Tensor as $Trait<&Tensor>>::$method(self, &Tensor::scalar(rhs))
+                    }
+                }
 
-impl Neg for &Tensor {
-    type Output = Tensor;
-    fn neg(self) -> Tensor {
-        Tensor::neg(self).unwrap_or_else(|e| panic!("{e}"))
+                impl $Trait<$scalar> for Tensor {
+                    type Output = Tensor;
+                    fn $method(self, rhs: $scalar) -> Tensor {
+                        <&Tensor as $Trait<&Tensor>>::$method(&self, &Tensor::scalar(rhs))
+                    }
+                }
+
+                impl $Trait<&Tensor> for $scalar {
+                    type Output = Tensor;
+                    fn $method(self, rhs: &Tensor) -> Tensor {
+                        <&Tensor as $Trait<&Tensor>>::$method(&Tensor::scalar(self), rhs)
+                    }
+                }
+
+                impl $Trait<Tensor> for $scalar {
+                    type Output = Tensor;
+                    fn $method(self, rhs: Tensor) -> Tensor {
+                        <&Tensor as $Trait<&Tensor>>::$method(&Tensor::scalar(self), &rhs)
+                    }
+                }
+            )*
+        };
     }
-}
 
-impl Neg for Tensor {
-    type Output = Tensor;
-    fn neg(self) -> Tensor {
-        -&self
+    binary_operator!(Add, add, add, f32, f64, i64);
+    binary_operator!(Sub, sub, sub, f32, f64, i64);
+    binary_operator!(Mul, mul, mul, f32, f64, i64);
+    binary_operator!(Div, div, div, f32, f64, i64);
+
+    macro_rules! assign_operator {
+        ($Trait:ident, $method:ident, $op:ident, $($scalar:ty),*) => {
+            impl $Trait<&Tensor> for Tensor {
+                fn $method(&mut self, rhs: &Tensor) {
+                    self.$op(rhs).unwrap_or_else(|e| panic!("{e}"))
+                }
+            }
+
+            $(impl $Trait<$scalar> for Tensor {
+                fn $method(&mut self, rhs: $scalar) {
+                    self.$op(&Tensor::scalar(rhs))
+                        .unwrap_or_else(|e| panic!("{e}"))
+                }
+            })*
+        };
+    }
+
+    assign_operator!(AddAssign, add_assign, add_, f32, f64, i64);
+    assign_operator!(SubAssign, sub_assign, sub_, f32, f64, i64);
+    assign_operator!(MulAssign, mul_assign, mul_, f32, f64, i64);
+    assign_operator!(DivAssign, div_assign, div_, f32, f64, i64);
+
+    impl Neg for &Tensor {
+        type Output = Tensor;
+        fn neg(self) -> Tensor {
+            Tensor::neg(self).unwrap_or_else(|e| panic!("{e}"))
+        }
+    }
+
+    impl Neg for Tensor {
+        type Output = Tensor;
+        fn neg(self) -> Tensor {
+            -&self
+        }
     }
 }
 

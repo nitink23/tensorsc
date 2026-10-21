@@ -6,6 +6,7 @@
 //! - [`Tensor`]: a *view* onto a storage, described by shape, strides, offset and dtype.
 
 mod arith;
+pub mod autograd;
 pub mod device;
 pub mod dtype;
 pub mod error;

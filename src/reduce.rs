@@ -14,8 +14,10 @@
 
 use std::marker::PhantomData;
 
+use crate::autograd::{Saved, constant, fit, is_grad_enabled, record};
 use crate::dtype::{DType, Element, with_dtype};
 use crate::error::{Result, TensorError};
+use crate::ops::where_;
 use crate::strided::{for_each_row, positions};
 use crate::tensor::{Tensor, contiguous_strides};
 use crate::views::normalize_axis;
@@ -262,6 +264,7 @@ impl<T: Element> Reducer<T> for Any {
 }
 
 /// Which axes a reduction runs over.
+#[derive(Clone)]
 struct Plan {
     /// `reduced[axis]` is true for axes being reduced.
     reduced: Vec<bool>,
@@ -362,19 +365,51 @@ impl Tensor {
         Ok(())
     }
 
+    /// Records a reduction whose input gradient is `local(g spread back
+    /// over the input, input, output spread back)`.
+    fn record_reduction(
+        &self,
+        out: Tensor,
+        plan: Plan,
+        name: &'static str,
+        local: fn(&Tensor, &Tensor, &Tensor, &Plan) -> Result<Tensor>,
+    ) -> Tensor {
+        record(out, [self], name, |out, _| {
+            let (x, out) = (Saved::new(self), Saved::new(out));
+            Box::new(move |g| {
+                let shape = x.shape();
+                let grad = local(
+                    &spread(g, &plan, shape)?,
+                    x.get()?,
+                    &spread(out.get()?, &plan, shape)?,
+                    &plan,
+                )?;
+                Ok(vec![Some(fit(&grad, &x)?)])
+            })
+        })
+    }
+
     /// Sum over `axes` (all if `None`). Floats keep their dtype; integers
     /// and bools sum to int64.
     pub fn sum(&self, axes: Option<&[isize]>, keepdim: bool) -> Result<Tensor> {
         let plan = self.plan(axes)?;
-        with_dtype!(self.dtype(), T => match self.dtype() {
+        let out = with_dtype!(self.dtype(), T => match self.dtype() {
             DType::F32 => self.reduce::<T, SumFloat<f32>>(&plan, keepdim),
             DType::F64 => self.reduce::<T, SumFloat<f64>>(&plan, keepdim),
             _ => self.reduce::<T, SumInt>(&plan, keepdim),
-        })
+        })?;
+        Ok(self.record_reduction(out, plan, "SumBackward", |g, _, _, _| Ok(g.shallow_clone())))
     }
 
-    /// Product over `axes`; dtypes as for [`Tensor::sum`].
+    /// Product over `axes`; dtypes as for [`Tensor::sum`]. Not differentiable
+    /// yet (its gradient needs care around zeros).
     pub fn prod(&self, axes: Option<&[isize]>, keepdim: bool) -> Result<Tensor> {
+        if is_grad_enabled() && self.requires_grad() {
+            return Err(TensorError::InvalidArgument(
+                "prod doesn't support gradients yet; compute it under no_grad() or on detach()"
+                    .into(),
+            ));
+        }
         let plan = self.plan(axes)?;
         with_dtype!(self.dtype(), T => match self.dtype() {
             DType::F32 => self.reduce::<T, ProdFloat<f32>>(&plan, keepdim),
@@ -386,24 +421,33 @@ impl Tensor {
     /// Mean over `axes`. Integers and bools give the default float dtype.
     pub fn mean(&self, axes: Option<&[isize]>, keepdim: bool) -> Result<Tensor> {
         let plan = self.plan(axes)?;
-        with_dtype!(self.dtype(), T => match self.dtype().to_float() {
+        let out = with_dtype!(self.dtype(), T => match self.dtype().to_float() {
             DType::F64 => self.reduce::<T, Mean<f64>>(&plan, keepdim),
             _ => self.reduce::<T, Mean<f32>>(&plan, keepdim),
-        })
+        })?;
+        Ok(
+            self.record_reduction(out, plan, "MeanBackward", |g, _, _, plan| {
+                g.div(&constant(plan.count as f64, g))
+            }),
+        )
     }
 
-    /// Largest value over `axes`; NaN wins. Keeps the dtype.
+    /// Largest value over `axes`; NaN wins. Keeps the dtype. The gradient
+    /// goes to the largest elements, split evenly between ties.
     pub fn max(&self, axes: Option<&[isize]>, keepdim: bool) -> Result<Tensor> {
         let plan = self.plan(axes)?;
         self.ensure_nonempty(&plan, "max")?;
-        with_dtype!(self.dtype(), T => self.reduce::<T, Max>(&plan, keepdim))
+        let out = with_dtype!(self.dtype(), T => self.reduce::<T, Max>(&plan, keepdim))?;
+        Ok(self.record_reduction(out, plan, "MaxBackward", extreme_grad))
     }
 
-    /// Smallest value over `axes`; NaN wins. Keeps the dtype.
+    /// Smallest value over `axes`; NaN wins. Keeps the dtype. Gradient as for
+    /// [`Tensor::max`].
     pub fn min(&self, axes: Option<&[isize]>, keepdim: bool) -> Result<Tensor> {
         let plan = self.plan(axes)?;
         self.ensure_nonempty(&plan, "min")?;
-        with_dtype!(self.dtype(), T => self.reduce::<T, Min>(&plan, keepdim))
+        let out = with_dtype!(self.dtype(), T => self.reduce::<T, Min>(&plan, keepdim))?;
+        Ok(self.record_reduction(out, plan, "MinBackward", extreme_grad))
     }
 
     /// Index of the largest value along `axis`, or into the flattened tensor
@@ -439,6 +483,24 @@ impl Tensor {
         let plan = self.plan(axes)?;
         with_dtype!(self.dtype(), T => self.reduce::<T, Any>(&plan, keepdim))
     }
+}
+
+/// A reduction's output (or its gradient) stretched back over the input's
+/// shape: reduced axes are put back as length 1, then broadcast (a view).
+fn spread(t: &Tensor, plan: &Plan, input_shape: &[usize]) -> Result<Tensor> {
+    let kept: Vec<isize> = plan.kept_shape.iter().map(|&d| d as isize).collect();
+    t.reshape(&kept)?.broadcast_to(input_shape)
+}
+
+/// Gradient of max/min: to every element equal to the extreme, divided by
+/// how many there are.
+fn extreme_grad(g: &Tensor, x: &Tensor, peak: &Tensor, plan: &Plan) -> Result<Tensor> {
+    let hits = x.eq(peak)?;
+    let axes: Vec<isize> = (0..x.ndim() as isize)
+        .filter(|&a| plan.reduced[a as usize])
+        .collect();
+    let ties = hits.to_dtype(g.dtype()).sum(Some(&axes), true)?;
+    where_(&hits, &g.div(&ties)?, &constant(0.0, g))
 }
 
 #[cfg(test)]

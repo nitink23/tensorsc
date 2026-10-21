@@ -1,6 +1,7 @@
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
+use crate::autograd::{AutogradMeta, empty_slot, record};
 use crate::device::Device;
 use crate::dtype::{DType, Element, Scalar, with_dtype};
 use crate::error::{Result, TensorError};
@@ -19,6 +20,8 @@ pub struct Tensor {
     pub(crate) shape: Vec<usize>,
     pub(crate) strides: Vec<isize>,
     pub(crate) offset: usize,
+    /// Set when the tensor requires grad (see `autograd.rs`).
+    pub(crate) autograd: OnceLock<Arc<AutogradMeta>>,
 }
 
 /// Row-major strides: the last axis is contiguous in memory.
@@ -66,6 +69,7 @@ impl Tensor {
             shape,
             strides,
             offset,
+            autograd: empty_slot(),
         }
     }
 
@@ -136,14 +140,24 @@ impl Tensor {
     }
 
     /// A new tensor with its own contiguous copy of this tensor's elements.
+    /// Differentiable (the gradient passes straight through).
     pub fn deep_copy(&self) -> Tensor {
-        with_dtype!(self.dtype(), T => Tensor::from_vec(self.to_vec::<T>(), &self.shape))
-            .expect("length matches shape")
+        let copy =
+            with_dtype!(self.dtype(), T => Tensor::from_vec(self.to_vec::<T>(), &self.shape))
+                .expect("length matches shape");
+        record(copy, [self], "CloneBackward", |_, _| {
+            Box::new(|g| Ok(vec![Some(g.shallow_clone())]))
+        })
     }
 
-    /// Another handle to the same view: same storage, same layout, no copy.
+    /// Another handle to the same tensor: same storage, layout and place in
+    /// the autograd graph, no copy.
     pub fn shallow_clone(&self) -> Tensor {
-        self.with_layout(self.shape.clone(), self.strides.clone(), self.offset)
+        let t = self.with_layout(self.shape.clone(), self.strides.clone(), self.offset);
+        if let Some(meta) = self.autograd.get() {
+            let _ = t.autograd.set(Arc::clone(meta));
+        }
+        t
     }
 
     /// This tensor converted to `dtype`: shares memory if it already has that
@@ -152,8 +166,16 @@ impl Tensor {
         if dtype == self.dtype() {
             return self.shallow_clone();
         }
-        with_dtype!(dtype, T => Tensor::from_vec(self.to_vec::<T>(), &self.shape))
-            .expect("length matches shape")
+        let converted = with_dtype!(dtype, T => Tensor::from_vec(self.to_vec::<T>(), &self.shape))
+            .expect("length matches shape");
+        if !dtype.is_float() {
+            // Integer and bool results are outside the graph.
+            return converted;
+        }
+        let from = self.dtype();
+        record(converted, [self], "ToCopyBackward", move |_, _| {
+            Box::new(move |g| Ok(vec![Some(g.to_dtype(from))]))
+        })
     }
 
     // ---- metadata ----
@@ -313,6 +335,11 @@ impl fmt::Display for Tensor {
         with_dtype!(self.dtype(), T => fmt_nested(f, &self.to_vec::<T>(), &self.shape))?;
         if !matches!(self.dtype(), DType::F32 | DType::I64 | DType::Bool) {
             write!(f, ", dtype={}", self.dtype())?;
+        }
+        match self.grad_fn_name() {
+            Some(name) => write!(f, ", grad_fn=<{name}>")?,
+            None if self.requires_grad() => f.write_str(", requires_grad=True")?,
+            None => {}
         }
         f.write_str(")")
     }

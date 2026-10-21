@@ -3,6 +3,7 @@
 
 mod buffer;
 mod convert;
+mod grad;
 mod pytensor;
 
 use pyo3::exceptions::PyTypeError;
@@ -24,23 +25,42 @@ use crate::tensor::Tensor;
 /// another tensor. Without `dtype`: bools stay bool, ints become int64,
 /// floats float32.
 #[pyfunction]
-#[pyo3(signature = (data, dtype=None))]
-fn tensor(data: &Bound<'_, PyAny>, dtype: Option<&Bound<'_, PyAny>>) -> PyResult<PyTensor> {
-    Ok(tensor_from_object(data, parse_optional_dtype(dtype)?)?.into())
+#[pyo3(signature = (data, dtype=None, requires_grad=false))]
+fn tensor(
+    data: &Bound<'_, PyAny>,
+    dtype: Option<&Bound<'_, PyAny>>,
+    requires_grad: bool,
+) -> PyResult<PyTensor> {
+    let t = tensor_from_object(data, parse_optional_dtype(dtype)?)?;
+    leaf(t, requires_grad)
+}
+
+/// A new tensor as a leaf, requiring grad if asked.
+fn leaf(t: Tensor, requires_grad: bool) -> PyResult<PyTensor> {
+    t.set_requires_grad(requires_grad)?;
+    Ok(t.into())
 }
 
 #[pyfunction]
-#[pyo3(signature = (*shape, dtype=None))]
-fn zeros(shape: &Bound<'_, PyTuple>, dtype: Option<&Bound<'_, PyAny>>) -> PyResult<PyTensor> {
+#[pyo3(signature = (*shape, dtype=None, requires_grad=false))]
+fn zeros(
+    shape: &Bound<'_, PyTuple>,
+    dtype: Option<&Bound<'_, PyAny>>,
+    requires_grad: bool,
+) -> PyResult<PyTensor> {
     let dtype = parse_optional_dtype(dtype)?.unwrap_or(DType::DEFAULT_FLOAT);
-    Ok(Tensor::zeros(&parse_shape(shape)?, dtype).into())
+    leaf(Tensor::zeros(&parse_shape(shape)?, dtype), requires_grad)
 }
 
 #[pyfunction]
-#[pyo3(signature = (*shape, dtype=None))]
-fn ones(shape: &Bound<'_, PyTuple>, dtype: Option<&Bound<'_, PyAny>>) -> PyResult<PyTensor> {
+#[pyo3(signature = (*shape, dtype=None, requires_grad=false))]
+fn ones(
+    shape: &Bound<'_, PyTuple>,
+    dtype: Option<&Bound<'_, PyAny>>,
+    requires_grad: bool,
+) -> PyResult<PyTensor> {
     let dtype = parse_optional_dtype(dtype)?.unwrap_or(DType::DEFAULT_FLOAT);
-    Ok(Tensor::ones(&parse_shape(shape)?, dtype).into())
+    leaf(Tensor::ones(&parse_shape(shape)?, dtype), requires_grad)
 }
 
 /// A Python number or a NumPy scalar (or other one-element buffer).
@@ -76,15 +96,19 @@ fn from_numpy(array: &Bound<'_, PyAny>) -> PyResult<PyTensor> {
 
 /// Without `dtype`, the dtype follows `fill_value` (as in PyTorch and NumPy).
 #[pyfunction]
-#[pyo3(signature = (shape, fill_value, dtype=None))]
+#[pyo3(signature = (shape, fill_value, dtype=None, requires_grad=false))]
 fn full(
     shape: &Bound<'_, PyAny>,
     fill_value: &Bound<'_, PyAny>,
     dtype: Option<&Bound<'_, PyAny>>,
+    requires_grad: bool,
 ) -> PyResult<PyTensor> {
     let value = number(fill_value, "fill_value")?;
     let dtype = parse_optional_dtype(dtype)?.unwrap_or(value.default_dtype());
-    Ok(Tensor::full(&parse_shape_arg(shape)?, value, dtype).into())
+    leaf(
+        Tensor::full(&parse_shape_arg(shape)?, value, dtype),
+        requires_grad,
+    )
 }
 
 /// `arange(stop)`, `arange(start, stop)` or `arange(start, stop, step)`.
@@ -282,6 +306,11 @@ macro_rules! add_functions {
 fn tensorsc(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTensor>()?;
     m.add_class::<PyDType>()?;
+    m.add_class::<grad::GradMode>()?;
+    m.add_function(wrap_pyfunction!(grad::no_grad, m)?)?;
+    m.add_function(wrap_pyfunction!(grad::enable_grad, m)?)?;
+    m.add_function(wrap_pyfunction!(grad::py_is_grad_enabled, m)?)?;
+    m.add_function(wrap_pyfunction!(grad::py_set_grad_enabled, m)?)?;
     for dtype in DType::ALL {
         m.add(dtype.name(), PyDType { dtype })?;
     }

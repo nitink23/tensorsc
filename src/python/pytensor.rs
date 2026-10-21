@@ -86,10 +86,16 @@ impl PyTensor {
 #[pymethods]
 impl PyTensor {
     #[new]
-    #[pyo3(signature = (data, dtype=None))]
-    fn py_new(data: &Bound<'_, PyAny>, dtype: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+    #[pyo3(signature = (data, dtype=None, requires_grad=false))]
+    fn py_new(
+        data: &Bound<'_, PyAny>,
+        dtype: Option<&Bound<'_, PyAny>>,
+        requires_grad: bool,
+    ) -> PyResult<Self> {
         let dtype = dtype.map(parse_dtype).transpose()?;
-        Ok(tensor_from_object(data, dtype)?.into())
+        let t = tensor_from_object(data, dtype)?;
+        t.set_requires_grad(requires_grad)?;
+        Ok(t.into())
     }
 
     // ---- metadata ----
@@ -177,6 +183,68 @@ impl PyTensor {
     unsafe fn __releasebuffer__(&self, view: *mut pyo3::ffi::Py_buffer) {
         // SAFETY: Python passes back a view that `__getbuffer__` filled.
         unsafe { crate::python::buffer::release(view) }
+    }
+
+    // ---- autograd ----
+
+    /// Whether gradients are computed for this tensor. Settable on leaves
+    /// (float tensors only).
+    #[getter]
+    fn get_requires_grad(&self) -> bool {
+        self.inner.requires_grad()
+    }
+
+    #[setter]
+    fn set_requires_grad(&self, requires_grad: bool) -> PyResult<()> {
+        Ok(self.inner.set_requires_grad(requires_grad)?)
+    }
+
+    /// Sets `requires_grad` in place and returns this tensor (PyTorch's `requires_grad_`).
+    #[pyo3(signature = (requires_grad=true))]
+    fn requires_grad_(slf: Bound<'_, Self>, requires_grad: bool) -> PyResult<Bound<'_, Self>> {
+        slf.get().inner.set_requires_grad(requires_grad)?;
+        Ok(slf)
+    }
+
+    /// The gradient accumulated by `backward()` (leaves only); assign `None`
+    /// to clear it.
+    #[getter]
+    fn get_grad(&self) -> Option<PyTensor> {
+        self.inner.grad().map(Into::into)
+    }
+
+    #[setter]
+    fn set_grad(&self, grad: Option<&PyTensor>) -> PyResult<()> {
+        Ok(self.inner.set_grad(grad.map(|g| g.inner.detach()))?)
+    }
+
+    #[getter]
+    fn is_leaf(&self) -> bool {
+        self.inner.is_leaf()
+    }
+
+    /// Name of the operation that produced this tensor (e.g. "MulBackward"),
+    /// or None for leaves.
+    #[getter]
+    fn grad_fn(&self) -> Option<&'static str> {
+        self.inner.grad_fn_name()
+    }
+
+    /// Computes gradients of this tensor with respect to the leaves that
+    /// require grad, adding them to their `.grad`. `gradient` may be omitted
+    /// for one-element tensors.
+    #[pyo3(signature = (gradient=None))]
+    fn backward(&self, gradient: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        let gradient = gradient
+            .filter(|g| !g.is_none())
+            .map(|g| require_operand(g, self.inner.dtype()))
+            .transpose()?;
+        Ok(self.inner.backward(gradient.as_ref())?)
+    }
+
+    /// The same data, outside the autograd graph (shares memory).
+    fn detach(&self) -> PyTensor {
+        self.inner.detach().into()
     }
 
     // ---- copies and conversion ----

@@ -11,6 +11,7 @@
 //! correct kernel, not a tuned BLAS (no cache blocking or threads yet).
 
 use crate::arith::{Numeric, with_numeric};
+use crate::autograd::{Saved, no_grad, record, sum_to, when};
 use crate::dtype::DType;
 use crate::error::{Result, TensorError};
 use crate::kernels::read_both;
@@ -32,8 +33,57 @@ fn gemm<T: Numeric>(a: &[T], b: &[T], c: &mut [T], m: usize, k: usize, n: usize)
     }
 }
 
+/// `t` with the matrix axes (the last two) swapped, if it has at least two.
+fn swap_matrix_axes(t: &Tensor) -> Result<Tensor> {
+    t.transpose(-1, -2)
+}
+
 impl Tensor {
+    /// Matrix product. Gradients: `dA = dC @ B^T` and `dB = A^T @ dC`, with
+    /// 1-D operands promoted the same way as in the forward pass and batch
+    /// broadcasting undone by summing.
     pub fn matmul(&self, other: &Tensor) -> Result<Tensor> {
+        let out = no_grad(|| self.matmul_forward(other))?;
+        Ok(record(out, [self, other], "MatmulBackward", |_, n| {
+            let (a, b) = (Saved::new(self), Saved::new(other));
+            Box::new(move |g| {
+                let (av, bv) = (a.get()?, b.get()?);
+                // Work with the 2-D-or-more versions, as the forward pass did.
+                let a2 = if av.ndim() == 1 {
+                    av.unsqueeze(0)?
+                } else {
+                    av.shallow_clone()
+                };
+                let b2 = if bv.ndim() == 1 {
+                    bv.unsqueeze(-1)?
+                } else {
+                    bv.shallow_clone()
+                };
+                let mut g_shape: Vec<isize> = g.shape().iter().map(|&d| d as isize).collect();
+                if av.ndim() == 1 {
+                    g_shape.insert(g_shape.len() - usize::from(bv.ndim() != 1), 1);
+                }
+                if bv.ndim() == 1 {
+                    g_shape.push(1);
+                }
+                let g2 = g.reshape(&g_shape)?;
+                // Sum away broadcast batch axes (down to the promoted shape), then
+                // drop the axis a 1-D operand was given.
+                let back = |grad: Tensor, promoted: &Tensor, saved: &Saved| -> Result<Tensor> {
+                    let original: Vec<isize> = saved.shape().iter().map(|&d| d as isize).collect();
+                    Ok(sum_to(&grad, promoted.shape())?
+                        .reshape(&original)?
+                        .to_dtype(saved.dtype()))
+                };
+                Ok(vec![
+                    when(n[0], || back(g2.matmul(&swap_matrix_axes(&b2)?)?, &a2, &a))?,
+                    when(n[1], || back(swap_matrix_axes(&a2)?.matmul(&g2)?, &b2, &b))?,
+                ])
+            })
+        }))
+    }
+
+    fn matmul_forward(&self, other: &Tensor) -> Result<Tensor> {
         if self.ndim() == 0 || other.ndim() == 0 {
             return Err(TensorError::InvalidArgument(
                 "matmul needs at least 1-D operands (use * to multiply by a scalar)".into(),

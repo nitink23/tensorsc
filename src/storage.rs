@@ -14,6 +14,7 @@ use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 use std::slice;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::device::Device;
@@ -37,6 +38,9 @@ pub struct Storage {
     owner: Owner,
     /// Guards the elements behind `ptr` (the other fields never change).
     lock: RwLock<()>,
+    /// Bumped on every write, so autograd can tell when a tensor it saved for
+    /// the backward pass has been modified since.
+    version: AtomicU64,
 }
 
 // SAFETY: the elements are only reached through `read` and `write`, which
@@ -70,6 +74,7 @@ impl Storage {
                 capacity: data.capacity(),
             },
             lock: RwLock::new(()),
+            version: AtomicU64::new(0),
         }
     }
 
@@ -103,6 +108,7 @@ impl Storage {
             device: Device::Cpu,
             owner: Owner::External(owner),
             lock: RwLock::new(()),
+            version: AtomicU64::new(0),
         }
     }
 
@@ -124,6 +130,11 @@ impl Storage {
 
     pub fn is_writable(&self) -> bool {
         self.writable
+    }
+
+    /// How many times the elements have been written to (see `version`).
+    pub fn version(&self) -> u64 {
+        self.version.load(Ordering::Relaxed)
     }
 
     /// Address of the first element, for handing memory to other libraries.
@@ -161,6 +172,7 @@ impl Storage {
             return Err(TensorError::ReadOnly);
         }
         let lock = self.lock.write().expect("storage lock poisoned");
+        self.version.fetch_add(1, Ordering::Relaxed);
         // SAFETY: as in `read`, and the write lock makes this the only access.
         let data = unsafe { slice::from_raw_parts_mut(self.ptr.as_ptr().cast::<T>(), self.len) };
         Ok(WriteGuard { _lock: lock, data })

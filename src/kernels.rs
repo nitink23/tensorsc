@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use crate::autograd::is_grad_enabled;
 use crate::dtype::Element;
 use crate::error::{Result, TensorError};
 use crate::ops::broadcast_shapes;
@@ -44,6 +45,7 @@ impl Tensor {
     /// (stride 0 along an axis longer than 1, from `expand`): writing through
     /// them elementwise would be ambiguous.
     pub(crate) fn ensure_writable_elementwise(&self) -> Result<()> {
+        self.ensure_not_tracked()?;
         let overlapping = self
             .shape
             .iter()
@@ -95,8 +97,21 @@ impl Tensor {
         found
     }
 
+    /// In-place writes would change values autograd may need later, so they
+    /// aren't allowed on tensors that require grad (except under `no_grad`).
+    pub(crate) fn ensure_not_tracked(&self) -> Result<()> {
+        if is_grad_enabled() && self.requires_grad() {
+            return Err(TensorError::InvalidArgument(
+                "in-place operations aren't allowed on a tensor that requires grad;                  do it under no_grad() (e.g. for an optimizer step) or on a clone()"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Sets every element of this view to `value`.
     pub(crate) fn fill_with<T: Element>(&self, value: T) -> Result<()> {
+        self.ensure_not_tracked()?;
         let mut data = self.storage.write::<T>()?;
         for_each_row(
             &self.shape,
