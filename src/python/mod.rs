@@ -1,6 +1,7 @@
 //! Python bindings. Everything here converts between Python objects and the
 //! core types; tensor logic itself belongs in the core modules.
 
+mod buffer;
 mod convert;
 mod pytensor;
 
@@ -42,10 +43,35 @@ fn ones(shape: &Bound<'_, PyTuple>, dtype: Option<&Bound<'_, PyAny>>) -> PyResul
     Ok(Tensor::ones(&parse_shape(shape)?, dtype).into())
 }
 
+/// A Python number or a NumPy scalar (or other one-element buffer).
 fn number(obj: &Bound<'_, PyAny>, what: &str) -> PyResult<Scalar> {
-    scalar_from_py(obj)?.ok_or_else(|| {
-        PyTypeError::new_err(format!("{what} must be a number, got {}", type_name(obj)))
-    })
+    if let Some(value) = scalar_from_py(obj)? {
+        return Ok(value);
+    }
+    if buffer::has_buffer(obj) {
+        let t = buffer::tensor_from_buffer(obj)?;
+        if t.numel() == 1 {
+            return Ok(t.item()?);
+        }
+    }
+    Err(PyTypeError::new_err(format!(
+        "{what} must be a number, got {}",
+        type_name(obj)
+    )))
+}
+
+/// A tensor sharing memory with a NumPy array (or any buffer-protocol
+/// object), like `torch.from_numpy`: writes through either are visible in
+/// both. Read-only arrays give read-only tensors; bool arrays are copied.
+#[pyfunction]
+fn from_numpy(array: &Bound<'_, PyAny>) -> PyResult<PyTensor> {
+    if !buffer::has_buffer(array) {
+        return Err(PyTypeError::new_err(format!(
+            "expected a NumPy array (or another buffer-protocol object), got {}",
+            type_name(array)
+        )));
+    }
+    Ok(buffer::tensor_from_buffer(array)?.into())
 }
 
 /// Without `dtype`, the dtype follows `fill_value` (as in PyTorch and NumPy).
@@ -305,6 +331,7 @@ fn tensorsc(m: &Bound<'_, PyModule>) -> PyResult<()> {
         argmax,
         argmin,
         matmul,
+        from_numpy,
     );
     Ok(())
 }

@@ -137,9 +137,46 @@ impl PyTensor {
         self.inner.dtype().is_float()
     }
 
-    /// True when both tensors read and write the same memory.
+    /// True when both tensors read and write the same memory (including
+    /// through NumPy: `ts.from_numpy(np.asarray(t)).shares_memory(t)`).
     fn shares_memory(&self, other: &PyTensor) -> bool {
-        self.inner.shares_storage(&other.inner)
+        self.inner.overlaps_memory(&other.inner)
+    }
+
+    // ---- NumPy and the buffer protocol ----
+
+    /// False for tensors over read-only memory (e.g. from a read-only NumPy array).
+    #[getter]
+    fn is_writable(&self) -> bool {
+        self.inner.is_writable()
+    }
+
+    /// A NumPy array sharing this tensor's memory (no copy). Read-only for
+    /// bool, read-only and expanded tensors.
+    fn numpy<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        slf.py().import("numpy")?.call_method1("asarray", (slf,))
+    }
+
+    /// Makes `ndarray + tensor` (and other mixed operators) defer to the
+    /// tensor, so the result is a tensor, as in PyTorch.
+    #[classattr]
+    fn __array_priority__() -> f64 {
+        1000.0
+    }
+
+    /// Exposes the tensor's memory to NumPy, memoryview, etc. (no copy).
+    unsafe fn __getbuffer__(
+        slf: Bound<'_, Self>,
+        view: *mut pyo3::ffi::Py_buffer,
+        flags: std::ffi::c_int,
+    ) -> PyResult<()> {
+        // SAFETY: Python passes a valid view to fill.
+        unsafe { crate::python::buffer::export(&slf, view, flags) }
+    }
+
+    unsafe fn __releasebuffer__(&self, view: *mut pyo3::ffi::Py_buffer) {
+        // SAFETY: Python passes back a view that `__getbuffer__` filled.
+        unsafe { crate::python::buffer::release(view) }
     }
 
     // ---- copies and conversion ----

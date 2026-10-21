@@ -210,9 +210,17 @@ impl Tensor {
         true
     }
 
-    /// True when both tensors are views onto the same buffer.
+    /// True when both tensors are views onto the same `Storage` object (and
+    /// so the same lock).
     pub fn shares_storage(&self, other: &Tensor) -> bool {
         Arc::ptr_eq(&self.storage, &other.storage)
+    }
+
+    /// True when the two tensors' memory may overlap: the same storage, or
+    /// different storages wrapping the same bytes. Writing into one while
+    /// reading the other then needs a copy.
+    pub fn overlaps_memory(&self, other: &Tensor) -> bool {
+        self.shares_storage(other) || self.storage.overlaps(&other.storage)
     }
 
     // ---- element access ----

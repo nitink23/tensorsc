@@ -168,10 +168,10 @@ impl Tensor {
                 expected: self.shape.clone(),
                 got: other.shape.clone(),
             })?;
-        if self.shares_storage(&b) {
-            // Writing while reading the same buffer could read values that were
-            // already overwritten (`a[1:] += a[:-1]`), so work from a copy, as
-            // NumPy does.
+        if self.overlaps_memory(&b) {
+            // Writing while reading the same memory could read values that were
+            // already overwritten (`a[1:] += a[:-1]`), and would alias a mutable
+            // slice, so work from a copy, as NumPy does.
             return self.zip_map_assign(&b.deep_copy(), f);
         }
         let mut dst;

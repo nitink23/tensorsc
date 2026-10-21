@@ -1247,6 +1247,37 @@ mod tests {
     }
 
     #[test]
+    fn distinct_storages_over_the_same_memory() {
+        use crate::storage::Storage;
+        use std::ptr::NonNull;
+        use std::sync::{Arc, Mutex};
+        // Two storages wrapping one buffer, as when a tensor goes out to NumPy
+        // and comes back. The owner keeps the buffer alive for both.
+        let owner = Arc::new(Mutex::new(vec![1.0f32, 2.0, 3.0, 4.0]));
+        let ptr = NonNull::new(owner.lock().unwrap().as_mut_ptr().cast()).unwrap();
+        let wrap = || {
+            // SAFETY: the Vec outlives both storages (each holds the Arc), and
+            // tensorsc never holds a write guard on one while reading the other
+            // over the same bytes: that's exactly what this test checks.
+            let s = unsafe {
+                Storage::from_external(ptr, 4, DType::F32, true, Box::new(owner.clone()))
+            };
+            Tensor::from_parts(Arc::new(s), vec![4], vec![1], 0)
+        };
+        let (a, b) = (wrap(), wrap());
+        assert!(!a.shares_storage(&b) && a.overlaps_memory(&b));
+        a.add_(&b).unwrap();
+        assert_eq!(v(&b), vec![2.0, 4.0, 6.0, 8.0]);
+        // Shifted overlap through different storages reads the original values.
+        a.slice(0, Some(1), None, 1)
+            .unwrap()
+            .add_(&b.slice(0, None, Some(-1), 1).unwrap())
+            .unwrap();
+        assert_eq!(v(&a), vec![2.0, 6.0, 10.0, 14.0]);
+        assert!(!a.overlaps_memory(&t(&[0.0], &[1])));
+    }
+
+    #[test]
     fn writing_into_an_expanded_tensor_is_an_error() {
         let x = t(&[1.0, 2.0], &[2, 1]);
         let e = x.expand(&[2, 3]).unwrap();

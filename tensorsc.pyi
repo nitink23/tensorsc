@@ -53,7 +53,15 @@ class Tensor:
     def is_contiguous(self) -> bool: ...
     def is_floating_point(self) -> bool: ...
     def shares_memory(self, other: Tensor) -> bool:
-        """True when both tensors read and write the same memory."""
+        """True when both tensors read and write the same memory (also through NumPy)."""
+    @property
+    def is_writable(self) -> bool:
+        """False for tensors over read-only memory (e.g. a read-only NumPy array)."""
+
+    # NumPy: tensors support the buffer protocol, so np.asarray(t) shares memory.
+    def numpy(self) -> Any:
+        """A NumPy array sharing this tensor's memory (read-only for bool/expanded tensors)."""
+    def __buffer__(self, flags: int) -> memoryview: ...
 
     # copies and conversion
     def clone(self) -> Tensor: ...
@@ -202,9 +210,14 @@ class Tensor:
     def __matmul__(self, other: _Operand) -> Tensor: ...
     def __rmatmul__(self, other: _Operand) -> Tensor: ...
 
+# NumPy
+def from_numpy(array: Any) -> Tensor:
+    """A tensor sharing memory with a NumPy array (or any buffer); bool arrays are copied."""
+
 # creation
 def tensor(data: Union[_Nested, Tensor], dtype: _DTypeLike | None = None) -> Tensor:
-    """A new tensor (a copy). Without dtype: bools stay bool, ints become int64, floats float32."""
+    """A new tensor (a copy) from a tensor, NumPy array, number or nested list.
+    Without dtype: arrays keep theirs, bools stay bool, ints become int64, floats float32."""
 def zeros(*shape: _Shape, dtype: _DTypeLike | None = None) -> Tensor: ...
 def ones(*shape: _Shape, dtype: _DTypeLike | None = None) -> Tensor: ...
 def full(shape: _Shape, fill_value: _Number, dtype: _DTypeLike | None = None) -> Tensor: ...

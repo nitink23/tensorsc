@@ -9,6 +9,7 @@ use pyo3::types::{PyBool, PyEllipsis, PyFloat, PyInt, PyList, PySlice, PyString,
 
 use crate::dtype::{DType, Element, Scalar, with_dtype};
 use crate::error::TensorError;
+use crate::python::buffer::{has_buffer, tensor_from_buffer};
 use crate::python::pytensor::PyTensor;
 use crate::tensor::Tensor;
 use crate::views::TensorIndex;
@@ -296,16 +297,19 @@ fn ragged() -> PyErr {
     PyValueError::new_err("nested sequences must be rectangular (every row the same length)")
 }
 
-/// Builds a new tensor (always a copy) from a tensor, a number or a nested
-/// list. Without `dtype`, it's inferred: bools stay bool, ints become int64,
-/// floats float32.
+/// Builds a new tensor (always a copy) from a tensor, a NumPy array (or
+/// other buffer), a number or a nested list. Without `dtype`, it's inferred:
+/// buffers keep theirs, bools stay bool, ints become int64, floats float32.
 pub(crate) fn tensor_from_object(obj: &Bound<'_, PyAny>, dtype: Option<DType>) -> PyResult<Tensor> {
+    let copy = |t: &Tensor| match dtype {
+        Some(d) if d != t.dtype() => t.to_dtype(d),
+        _ => t.deep_copy(),
+    };
     if let Ok(other) = obj.cast::<PyTensor>() {
-        let t = &other.get().inner;
-        return Ok(match dtype {
-            Some(d) if d != t.dtype() => t.to_dtype(d),
-            _ => t.deep_copy(),
-        });
+        return Ok(copy(&other.get().inner));
+    }
+    if has_buffer(obj) {
+        return Ok(copy(&tensor_from_buffer(obj)?));
     }
     let mut shape = Vec::new();
     let mut data = Gathered::Bool(Vec::new());
@@ -326,13 +330,26 @@ pub(crate) fn weak_scalar(value: Scalar, other: DType) -> Tensor {
     Tensor::full(&[], value, weak_scalar_dtype(value, other))
 }
 
-/// The other side of an operation with a tensor of dtype `other`: a tensor
-/// (shared, not copied), a number (see [`weak_scalar_dtype`]), or a nested
-/// list. `None` means "not something we combine with", so binary operators
-/// can return `NotImplemented` and let Python try the other operand.
+/// A plain Python number, which adopts the dtype of the tensor it meets (see
+/// [`weak_scalar_dtype`]). NumPy scalars aren't plain: they carry their own
+/// dtype (as in NumPy 2), so they're treated like 0-d arrays instead.
+pub(crate) fn weak_number(obj: &Bound<'_, PyAny>) -> PyResult<Option<Scalar>> {
+    if has_buffer(obj) {
+        return Ok(None);
+    }
+    scalar_from_py(obj)
+}
+
+/// The other side of an operation with a tensor of dtype `other`: a tensor or
+/// NumPy array (shared, not copied), a number (see [`weak_scalar_dtype`]), or
+/// a nested list. `None` means "not something we combine with", so binary
+/// operators can return `NotImplemented` and let Python try the other operand.
 pub(crate) fn operand(obj: &Bound<'_, PyAny>, other: DType) -> PyResult<Option<Tensor>> {
     if let Ok(t) = obj.cast::<PyTensor>() {
         return Ok(Some(t.get().inner.shallow_clone()));
+    }
+    if has_buffer(obj) {
+        return tensor_from_buffer(obj).map(Some);
     }
     if let Some(value) = scalar_from_py(obj)? {
         return Ok(Some(weak_scalar(value, other)));
@@ -358,14 +375,14 @@ pub(crate) fn require_operand(obj: &Bound<'_, PyAny>, other: DType) -> PyResult<
 pub(crate) fn operands<const N: usize>(objs: [&Bound<'_, PyAny>; N]) -> PyResult<[Tensor; N]> {
     let mut anchor = None;
     for obj in objs {
-        if scalar_from_py(obj)?.is_none() {
+        if weak_number(obj)?.is_none() {
             anchor = Some(require_operand(obj, DType::DEFAULT_FLOAT)?.dtype());
             break;
         }
     }
     let mut out = Vec::with_capacity(N);
     for obj in objs {
-        out.push(match (anchor, scalar_from_py(obj)?) {
+        out.push(match (anchor, weak_number(obj)?) {
             (Some(dtype), Some(value)) => weak_scalar(value, dtype),
             (None, Some(value)) => Tensor::full(&[], value, value.default_dtype()),
             (_, None) => require_operand(obj, DType::DEFAULT_FLOAT)?,
@@ -466,6 +483,10 @@ pub(crate) fn parse_key(key: &Bound<'_, PyAny>) -> PyResult<Key> {
         Some(t.get().inner.shallow_clone())
     } else if key.is_instance_of::<PyList>() || key.is_instance_of::<PyBool>() {
         Some(tensor_from_object(key, None)?)
+    } else if has_buffer(key) && key.extract::<isize>().is_err() {
+        // NumPy masks and index arrays. NumPy integer scalars (which convert
+        // to an index) stay basic indexing, so `t[np.int64(1)]` is a view.
+        Some(tensor_from_buffer(key)?)
     } else {
         None
     };

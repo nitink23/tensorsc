@@ -131,6 +131,18 @@ impl Storage {
         self.ptr.as_ptr()
     }
 
+    /// True if the two buffers share any bytes. Distinct storages can overlap
+    /// when both wrap the same external memory (e.g. a tensor exported to
+    /// NumPy and imported back).
+    pub fn overlaps(&self, other: &Storage) -> bool {
+        let range = |s: &Storage| {
+            let start = s.ptr.as_ptr() as usize;
+            start..start + s.len * s.dtype.itemsize()
+        };
+        let (a, b) = (range(self), range(other));
+        a.start < b.end && b.start < a.end
+    }
+
     /// Shared access to the elements. Panics if `T` isn't this storage's dtype
     /// (that's a bug in tensorsc, not a user error).
     pub fn read<T: Element>(&self) -> ReadGuard<'_, T> {
