@@ -2,6 +2,7 @@
 //! core types; tensor logic itself belongs in the core modules.
 
 use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
+use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyEllipsis, PyFloat, PyIterator, PyList, PySlice, PyTuple};
 
@@ -89,12 +90,15 @@ fn tensor_from_object(obj: &Bound<'_, PyAny>) -> PyResult<Tensor> {
 
 /// Accepts both `f(2, 3)` and `f((2, 3))`, like PyTorch.
 fn parse_dims(args: &Bound<'_, PyTuple>) -> PyResult<Vec<isize>> {
-    if args.len() == 1
-        && let Ok(dims) = args.get_item(0)?.extract::<Vec<isize>>()
-    {
-        return Ok(dims);
+    // Check the type rather than trying one form and falling back: a failed
+    // extraction builds a Python exception, which costs more than the work.
+    if args.len() == 1 {
+        let first = args.get_item(0)?;
+        if first.is_instance_of::<PyList>() || first.is_instance_of::<PyTuple>() {
+            return first.extract();
+        }
     }
-    args.extract()
+    args.iter().map(|dim| dim.extract()).collect()
 }
 
 /// Like [`parse_dims`], for sizes that can't be negative.
@@ -116,11 +120,17 @@ fn parse_index_item(obj: &Bound<'_, PyAny>) -> PyResult<TensorIndex> {
         return Ok(TensorIndex::Ellipsis);
     }
     if let Ok(slice) = obj.cast::<PySlice>() {
-        let step: Option<isize> = slice.getattr("step")?.extract()?;
+        // CPython's own slice decoding (NumPy uses it too): fills in defaults
+        // for missing bounds and clamps huge ones, as list slicing does.
+        let (mut start, mut stop, mut step) = (0, 0, 0);
+        // SAFETY: `slice` is a live slice object and the pointers are to locals.
+        if unsafe { ffi::PySlice_Unpack(slice.as_ptr(), &mut start, &mut stop, &mut step) } < 0 {
+            return Err(PyErr::fetch(obj.py()));
+        }
         return Ok(TensorIndex::Slice {
-            start: slice.getattr("start")?.extract()?,
-            stop: slice.getattr("stop")?.extract()?,
-            step: step.unwrap_or(1),
+            start: Some(start),
+            stop: Some(stop),
+            step,
         });
     }
     obj.extract::<isize>()
@@ -139,6 +149,9 @@ fn parse_index(key: &Bound<'_, PyAny>) -> PyResult<Vec<TensorIndex>> {
 fn to_nested<'py>(py: Python<'py>, data: &[f32], shape: &[usize]) -> PyResult<Bound<'py, PyAny>> {
     match shape.split_first() {
         None => Ok(PyFloat::new(py, data[0] as f64).into_any()),
+        // Innermost lists come straight from the floats, without first
+        // collecting a Vec of Python objects.
+        Some((_, [])) => Ok(PyList::new(py, data.iter().map(|&x| x as f64))?.into_any()),
         Some((&len, rest)) => {
             let chunk: usize = rest.iter().product();
             let items = (0..len)

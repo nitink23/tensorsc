@@ -23,6 +23,13 @@ def test_slicing_matches_python_lists(start, stop, step):
     assert t[:, sl].tolist() == [row[sl] for row in data]
 
 
+def test_huge_slice_bounds_behave_like_lists():
+    t, data = grid()
+    for sl in (slice(None, 10**30), slice(-(10**30), None), slice(None, None, 10**30),
+               slice(None, None, -(10**30)), slice(10**30, None, -1)):
+        assert t[sl].tolist() == data[sl], sl
+
+
 def test_indexing_returns_views():
     t, data = grid()
     assert t[1].tolist() == data[1]

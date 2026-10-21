@@ -86,7 +86,8 @@ fn slice_range(
     let len = if span <= 0 {
         0
     } else {
-        (span + step_abs - 1) / step_abs
+        // Ceiling division written so it can't overflow for huge steps.
+        (span - 1) / step_abs + 1
     };
     (start, len as usize)
 }
@@ -413,6 +414,15 @@ mod tests {
         assert_eq!(slice_range(Some(5), Some(2), 1, 10).1, 0);
         assert_eq!(slice_range(Some(-100), Some(100), 1, 10), (0, 10));
         assert_eq!(slice_range(None, None, 1, 0).1, 0);
+        // Huge steps (as CPython passes for `[::10**30]`) must not overflow.
+        assert_eq!(
+            slice_range(Some(0), Some(isize::MAX), isize::MAX, 10),
+            (0, 1)
+        );
+        assert_eq!(
+            slice_range(Some(isize::MAX), Some(isize::MIN), -isize::MAX, 10),
+            (9, 1)
+        );
     }
 
     #[test]

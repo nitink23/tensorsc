@@ -161,12 +161,15 @@ impl Tensor {
     /// True when elements are laid out row-major with no gaps, i.e. the view
     /// could be handed to code that expects a plain flat array.
     pub fn is_contiguous(&self) -> bool {
-        let expected = contiguous_strides(&self.shape);
-        self.shape
-            .iter()
-            .zip(self.strides.iter().zip(&expected))
+        let mut expected = 1isize;
+        for (&dim, &stride) in self.shape.iter().zip(&self.strides).rev() {
             // Axes of length 1 never move, so their stride doesn't matter.
-            .all(|(&dim, (&stride, &want))| dim == 1 || stride == want)
+            if dim != 1 && stride != expected {
+                return false;
+            }
+            expected *= dim as isize;
+        }
+        true
     }
 
     /// True when both tensors are views onto the same buffer.
