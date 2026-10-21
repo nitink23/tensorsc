@@ -149,6 +149,48 @@ fn to_nested<'py>(py: Python<'py>, data: &[f32], shape: &[usize]) -> PyResult<Bo
     }
 }
 
+/// The other side of an arithmetic op: a tensor (shared, not copied), a number,
+/// or a nested list. `None` means "not something we combine with", so binary
+/// operators can return `NotImplemented` and let Python try the other operand.
+fn operand(obj: &Bound<'_, PyAny>) -> PyResult<Option<Tensor>> {
+    if let Ok(t) = obj.cast::<PyTensor>() {
+        return Ok(Some(t.get().inner.shallow_clone()));
+    }
+    if let Ok(x) = obj.extract::<f32>() {
+        return Ok(Some(Tensor::scalar(x)));
+    }
+    if obj.is_instance_of::<PyList>() || obj.is_instance_of::<PyTuple>() {
+        return tensor_from_object(obj).map(Some);
+    }
+    Ok(None)
+}
+
+/// [`operand`] for places where anything else is a `TypeError`.
+fn require_operand(obj: &Bound<'_, PyAny>) -> PyResult<Tensor> {
+    operand(obj)?.ok_or_else(|| {
+        let type_name = obj
+            .get_type()
+            .name()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|_| "?".into());
+        PyTypeError::new_err(format!(
+            "expected a tensor, number or list, got {type_name}"
+        ))
+    })
+}
+
+/// Runs a binary op if `other` is usable, otherwise returns `NotImplemented`.
+fn binary_op<'py>(
+    py: Python<'py>,
+    other: &Bound<'py, PyAny>,
+    op: impl FnOnce(&Tensor) -> crate::Result<Tensor>,
+) -> PyResult<Bound<'py, PyAny>> {
+    match operand(other)? {
+        Some(other) => Ok(Bound::new(py, PyTensor::from(op(&other)?))?.into_any()),
+        None => Ok(py.NotImplemented().into_bound(py)),
+    }
+}
+
 impl PyTensor {
     /// Indexes and converts the result: a plain float when every axis got an
     /// integer (like NumPy), otherwise a tensor view.
@@ -324,18 +366,11 @@ impl PyTensor {
         self.index_to_py(py, &parse_index(key)?)
     }
 
-    /// Writes through the indexed view. `value` can be a number (fills the
-    /// view), a tensor, or a nested list of the view's shape.
+    /// Writes through the indexed view. `value` can be a number, a tensor or a
+    /// nested list, and is broadcast to the view's shape.
     fn __setitem__(&self, key: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
         let view = self.inner.index(&parse_index(key)?)?;
-        if let Ok(number) = value.extract::<f32>() {
-            view.fill(number);
-        } else if let Ok(src) = value.cast::<PyTensor>() {
-            view.copy_from(&src.get().inner)?;
-        } else {
-            view.copy_from(&tensor_from_object(value)?)?;
-        }
-        Ok(())
+        Ok(view.copy_from(&require_operand(value)?)?)
     }
 
     fn __float__(&self) -> PyResult<f32> {
@@ -344,6 +379,221 @@ impl PyTensor {
 
     fn __repr__(&self) -> String {
         self.inner.to_string()
+    }
+
+    // ---- broadcasting ----
+
+    /// A view stretched to `shape` (stride 0 along broadcast axes); -1 keeps a size.
+    #[pyo3(signature = (*shape))]
+    fn expand(&self, shape: &Bound<'_, PyTuple>) -> PyResult<PyTensor> {
+        Ok(self.inner.expand(&parse_dims(shape)?)?.into())
+    }
+
+    fn broadcast_to(&self, shape: Vec<usize>) -> PyResult<PyTensor> {
+        Ok(self.inner.broadcast_to(&shape)?.into())
+    }
+
+    // ---- arithmetic operators ----
+
+    fn __add__<'py>(
+        &self,
+        py: Python<'py>,
+        other: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        binary_op(py, other, |o| self.inner.add(o))
+    }
+
+    fn __radd__<'py>(
+        &self,
+        py: Python<'py>,
+        other: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        binary_op(py, other, |o| o.add(&self.inner))
+    }
+
+    fn __sub__<'py>(
+        &self,
+        py: Python<'py>,
+        other: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        binary_op(py, other, |o| self.inner.sub(o))
+    }
+
+    fn __rsub__<'py>(
+        &self,
+        py: Python<'py>,
+        other: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        binary_op(py, other, |o| o.sub(&self.inner))
+    }
+
+    fn __mul__<'py>(
+        &self,
+        py: Python<'py>,
+        other: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        binary_op(py, other, |o| self.inner.mul(o))
+    }
+
+    fn __rmul__<'py>(
+        &self,
+        py: Python<'py>,
+        other: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        binary_op(py, other, |o| o.mul(&self.inner))
+    }
+
+    fn __truediv__<'py>(
+        &self,
+        py: Python<'py>,
+        other: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        binary_op(py, other, |o| self.inner.div(o))
+    }
+
+    fn __rtruediv__<'py>(
+        &self,
+        py: Python<'py>,
+        other: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        binary_op(py, other, |o| o.div(&self.inner))
+    }
+
+    fn __pow__<'py>(
+        &self,
+        py: Python<'py>,
+        other: &Bound<'py, PyAny>,
+        _modulo: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        binary_op(py, other, |o| self.inner.pow(o))
+    }
+
+    fn __rpow__<'py>(
+        &self,
+        py: Python<'py>,
+        other: &Bound<'py, PyAny>,
+        _modulo: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        binary_op(py, other, |o| o.pow(&self.inner))
+    }
+
+    // In-place operators write through to the shared storage, so every view
+    // of this tensor sees the change (like NumPy and PyTorch).
+
+    fn __iadd__(&self, other: &Bound<'_, PyAny>) -> PyResult<()> {
+        Ok(self.inner.add_(&require_operand(other)?)?)
+    }
+
+    fn __isub__(&self, other: &Bound<'_, PyAny>) -> PyResult<()> {
+        Ok(self.inner.sub_(&require_operand(other)?)?)
+    }
+
+    fn __imul__(&self, other: &Bound<'_, PyAny>) -> PyResult<()> {
+        Ok(self.inner.mul_(&require_operand(other)?)?)
+    }
+
+    fn __itruediv__(&self, other: &Bound<'_, PyAny>) -> PyResult<()> {
+        Ok(self.inner.div_(&require_operand(other)?)?)
+    }
+
+    fn __ipow__(
+        &self,
+        other: &Bound<'_, PyAny>,
+        _modulo: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        Ok(self.inner.pow_(&require_operand(other)?)?)
+    }
+
+    fn __neg__(&self) -> PyTensor {
+        self.inner.neg().into()
+    }
+
+    fn __pos__(&self) -> PyTensor {
+        self.inner.deep_copy().into()
+    }
+
+    fn __abs__(&self) -> PyTensor {
+        self.inner.abs().into()
+    }
+
+    // ---- named math (also available as module functions) ----
+
+    fn add(&self, other: &Bound<'_, PyAny>) -> PyResult<PyTensor> {
+        Ok(self.inner.add(&require_operand(other)?)?.into())
+    }
+
+    fn sub(&self, other: &Bound<'_, PyAny>) -> PyResult<PyTensor> {
+        Ok(self.inner.sub(&require_operand(other)?)?.into())
+    }
+
+    fn mul(&self, other: &Bound<'_, PyAny>) -> PyResult<PyTensor> {
+        Ok(self.inner.mul(&require_operand(other)?)?.into())
+    }
+
+    fn div(&self, other: &Bound<'_, PyAny>) -> PyResult<PyTensor> {
+        Ok(self.inner.div(&require_operand(other)?)?.into())
+    }
+
+    fn pow(&self, exponent: &Bound<'_, PyAny>) -> PyResult<PyTensor> {
+        Ok(self.inner.pow(&require_operand(exponent)?)?.into())
+    }
+
+    fn maximum(&self, other: &Bound<'_, PyAny>) -> PyResult<PyTensor> {
+        Ok(self.inner.maximum(&require_operand(other)?)?.into())
+    }
+
+    fn minimum(&self, other: &Bound<'_, PyAny>) -> PyResult<PyTensor> {
+        Ok(self.inner.minimum(&require_operand(other)?)?.into())
+    }
+
+    fn abs(&self) -> PyTensor {
+        self.inner.abs().into()
+    }
+
+    fn neg(&self) -> PyTensor {
+        self.inner.neg().into()
+    }
+
+    fn exp(&self) -> PyTensor {
+        self.inner.exp().into()
+    }
+
+    fn log(&self) -> PyTensor {
+        self.inner.log().into()
+    }
+
+    fn sqrt(&self) -> PyTensor {
+        self.inner.sqrt().into()
+    }
+
+    fn sin(&self) -> PyTensor {
+        self.inner.sin().into()
+    }
+
+    fn cos(&self) -> PyTensor {
+        self.inner.cos().into()
+    }
+
+    fn tanh(&self) -> PyTensor {
+        self.inner.tanh().into()
+    }
+
+    fn sigmoid(&self) -> PyTensor {
+        self.inner.sigmoid().into()
+    }
+
+    fn relu(&self) -> PyTensor {
+        self.inner.relu().into()
+    }
+
+    #[pyo3(signature = (min=None, max=None))]
+    fn clamp(&self, min: Option<f32>, max: Option<f32>) -> PyTensor {
+        self.inner.clamp(min, max).into()
+    }
+
+    #[pyo3(signature = (other, rtol=1e-5, atol=1e-8))]
+    fn allclose(&self, other: &Bound<'_, PyAny>, rtol: f32, atol: f32) -> PyResult<bool> {
+        Ok(self.inner.allclose(&require_operand(other)?, rtol, atol)?)
     }
 }
 
@@ -385,6 +635,62 @@ fn arange(start: f32, end: Option<f32>, step: f32) -> PyResult<PyTensor> {
     Ok(Tensor::arange(start, end, step)?.into())
 }
 
+// ---- math functions: `ts.exp(x)` etc. accept tensors, numbers and lists ----
+
+macro_rules! unary_functions {
+    ($($name:ident),* $(,)?) => {
+        $(
+            #[pyfunction]
+            fn $name(x: &Bound<'_, PyAny>) -> PyResult<PyTensor> {
+                Ok(require_operand(x)?.$name().into())
+            }
+        )*
+    };
+}
+
+unary_functions!(abs, exp, log, sqrt, sin, cos, tanh, sigmoid, relu);
+
+#[pyfunction]
+fn maximum(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<PyTensor> {
+    Ok(require_operand(a)?.maximum(&require_operand(b)?)?.into())
+}
+
+#[pyfunction]
+fn minimum(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<PyTensor> {
+    Ok(require_operand(a)?.minimum(&require_operand(b)?)?.into())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, min=None, max=None))]
+fn clamp(x: &Bound<'_, PyAny>, min: Option<f32>, max: Option<f32>) -> PyResult<PyTensor> {
+    Ok(require_operand(x)?.clamp(min, max).into())
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, b, rtol=1e-5, atol=1e-8))]
+fn allclose(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>, rtol: f32, atol: f32) -> PyResult<bool> {
+    Ok(require_operand(a)?.allclose(&require_operand(b)?, rtol, atol)?)
+}
+
+#[pyfunction]
+fn broadcast_to(x: &Bound<'_, PyAny>, shape: Vec<usize>) -> PyResult<PyTensor> {
+    Ok(require_operand(x)?.broadcast_to(&shape)?.into())
+}
+
+/// The shape that the given shapes broadcast to.
+#[pyfunction]
+#[pyo3(signature = (*shapes))]
+fn broadcast_shapes<'py>(
+    py: Python<'py>,
+    shapes: Vec<Vec<usize>>,
+) -> PyResult<Bound<'py, PyTuple>> {
+    let mut out = Vec::new();
+    for shape in &shapes {
+        out = crate::ops::broadcast_shapes(&out, shape)?;
+    }
+    PyTuple::new(py, out)
+}
+
 #[pymodule]
 fn tensorsc(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTensor>()?;
@@ -393,5 +699,20 @@ fn tensorsc(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ones, m)?)?;
     m.add_function(wrap_pyfunction!(full, m)?)?;
     m.add_function(wrap_pyfunction!(arange, m)?)?;
+    m.add_function(wrap_pyfunction!(abs, m)?)?;
+    m.add_function(wrap_pyfunction!(exp, m)?)?;
+    m.add_function(wrap_pyfunction!(log, m)?)?;
+    m.add_function(wrap_pyfunction!(sqrt, m)?)?;
+    m.add_function(wrap_pyfunction!(sin, m)?)?;
+    m.add_function(wrap_pyfunction!(cos, m)?)?;
+    m.add_function(wrap_pyfunction!(tanh, m)?)?;
+    m.add_function(wrap_pyfunction!(sigmoid, m)?)?;
+    m.add_function(wrap_pyfunction!(relu, m)?)?;
+    m.add_function(wrap_pyfunction!(maximum, m)?)?;
+    m.add_function(wrap_pyfunction!(minimum, m)?)?;
+    m.add_function(wrap_pyfunction!(clamp, m)?)?;
+    m.add_function(wrap_pyfunction!(allclose, m)?)?;
+    m.add_function(wrap_pyfunction!(broadcast_to, m)?)?;
+    m.add_function(wrap_pyfunction!(broadcast_shapes, m)?)?;
     Ok(())
 }

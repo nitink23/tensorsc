@@ -8,6 +8,7 @@
 pub mod device;
 pub mod dtype;
 pub mod error;
+pub mod ops;
 pub mod storage;
 pub mod tensor;
 pub mod views;
@@ -18,6 +19,7 @@ mod python;
 pub use device::Device;
 pub use dtype::DType;
 pub use error::{Result, TensorError};
+pub use ops::broadcast_shapes;
 pub use storage::Storage;
 pub use tensor::Tensor;
 pub use views::TensorIndex;

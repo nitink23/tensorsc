@@ -122,6 +122,11 @@ impl Tensor {
         Tensor::from_vec(self.to_vec(), &self.shape).expect("length matches shape")
     }
 
+    /// Another handle to the same view: same storage, same layout, no copy.
+    pub fn shallow_clone(&self) -> Tensor {
+        self.with_layout(self.shape.clone(), self.strides.clone(), self.offset)
+    }
+
     // ---- metadata ----
 
     pub fn shape(&self) -> &[usize] {
@@ -225,20 +230,20 @@ impl Tensor {
         }
     }
 
-    /// Copies `src` element-by-element into this view. `src` must have the same
-    /// shape, or hold a single element (which is then written everywhere).
+    /// Copies `src` element-by-element into this view. `src` is broadcast to
+    /// this view's shape, and a single element is written everywhere.
     /// Safe even when `src` overlaps this view, e.g. `t[0] = t[1]`.
     pub fn copy_from(&self, src: &Tensor) -> Result<()> {
-        if src.shape != self.shape {
-            if src.numel() == 1 {
-                self.fill(src.item()?);
-                return Ok(());
-            }
-            return Err(TensorError::ShapeMismatch {
+        if src.numel() == 1 {
+            self.fill(src.item()?);
+            return Ok(());
+        }
+        let src = src
+            .broadcast_to(&self.shape)
+            .map_err(|_| TensorError::ShapeMismatch {
                 expected: self.shape.clone(),
                 got: src.shape.clone(),
-            });
-        }
+            })?;
         // Read everything before taking the write lock: src may share our storage.
         let values = src.to_vec();
         let positions = self.storage_positions();

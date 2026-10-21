@@ -291,7 +291,7 @@ impl Tensor {
     /// contiguous copy.
     pub fn contiguous(&self) -> Tensor {
         if self.is_contiguous() {
-            self.with_layout(self.shape.clone(), self.strides.clone(), self.offset)
+            self.shallow_clone()
         } else {
             self.deep_copy()
         }

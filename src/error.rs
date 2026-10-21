@@ -33,6 +33,11 @@ pub enum TensorError {
         expected: Vec<usize>,
         got: Vec<usize>,
     },
+    /// Two shapes can't be broadcast against each other.
+    BroadcastMismatch {
+        left: Vec<usize>,
+        right: Vec<usize>,
+    },
     InvalidArgument(String),
 }
 
@@ -71,6 +76,12 @@ impl fmt::Display for TensorError {
             }
             TensorError::ShapeMismatch { expected, got } => {
                 write!(f, "shape mismatch: expected {expected:?}, got {got:?}")
+            }
+            TensorError::BroadcastMismatch { left, right } => {
+                write!(
+                    f,
+                    "shapes {left:?} and {right:?} cannot be broadcast together"
+                )
             }
             TensorError::InvalidArgument(msg) => f.write_str(msg),
         }
