@@ -49,3 +49,11 @@ def test_matmul_grouped_gradients():
     (x@y).sum().backward()
     np.testing.assert_allclose(x.grad.numpy(),np.ones((5,33))@b.T,rtol=1e-10,atol=1e-10)
     np.testing.assert_allclose(y.grad.numpy(),a.T@np.ones((5,33)),rtol=1e-10,atol=1e-10)
+
+@pytest.mark.parametrize('dtype,value', [('bool',True),('uint8',7),('int32',-9),('int64',2**60+1),('float32',1.5),('float64',1.125)])
+def test_scalar_tolist_preserves_type(dtype,value):
+    x=ts.tensor(value,dtype=dtype)
+    assert x.tolist() == value
+    assert type(x.tolist()) is type(value)
+    # A singleton axis must still produce a list.
+    assert x.reshape(1).tolist() == [value]

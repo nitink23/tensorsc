@@ -352,6 +352,11 @@ impl PyTensor {
     }
 
     fn tolist<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        // Scalars need no temporary Vec or recursive list conversion. item()
+        // releases the storage guard before any Python object is created.
+        if self.inner.ndim() == 0 {
+            return scalar_to_py(py, self.inner.item()?);
+        }
         let shape = self.inner.shape();
         with_dtype!(self.inner.dtype(), T => to_nested(py, &self.inner.to_vec::<T>(), shape))
     }
