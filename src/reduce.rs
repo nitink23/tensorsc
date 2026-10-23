@@ -308,6 +308,21 @@ impl Tensor {
     }
 
     fn reduce<T: Element, R: Reducer<T>>(&self, plan: &Plan, keepdim: bool) -> Result<Tensor> {
+        // A contiguous full reduction is one fold into one scalar. Avoid an
+        // accumulator allocation and building an output-stride layout for it.
+        if plan.reduced.iter().all(|&r| r) && self.is_contiguous() {
+            let data = self.storage.read::<T>();
+            let value = R::finish(
+                R::fold_row(R::init(), &data[self.offset..self.offset + self.numel()]),
+                plan.count,
+            );
+            let shape = if keepdim {
+                plan.kept_shape.as_slice()
+            } else {
+                &[]
+            };
+            return Tensor::from_vec(vec![value], shape);
+        }
         let out_numel: usize = plan.kept_shape.iter().product();
         let mut acc = vec![R::init(); out_numel];
         // The output laid over the input's shape: stride 0 along reduced axes.

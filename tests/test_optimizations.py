@@ -31,7 +31,7 @@ def test_allclose_mismatch_and_late_difference():
     b = a.copy(); b[0]=2
     assert not ts.tensor(a).allclose(ts.tensor(b))
 @pytest.mark.parametrize('dtype', ['float32','float64','int32','int64'])
-@pytest.mark.parametrize('shape', [(4,16,32),(5,17,33),(2,3,16,32)])
+@pytest.mark.parametrize('shape', [(4,16,32),(5,17,33),(2,5,17,33)])
 def test_matmul_grouped_rows(dtype,shape):
     m,k,n=shape[-3:]
     rng=np.random.default_rng(7)
