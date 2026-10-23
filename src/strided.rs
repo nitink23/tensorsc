@@ -68,6 +68,27 @@ pub(crate) fn for_each_row<const N: usize>(
     if shape.contains(&0) {
         return;
     }
+    // Most calls are contiguous, a broadcast scalar, or a reversed flat
+    // view. Recognize a single row before allocating coalesced layout vectors.
+    let last = shape.iter().rposition(|&dim| dim != 1);
+    let inner: [isize; N] = array::from_fn(|k| last.map_or(0, |axis| strides[k][axis]));
+    let single_row = (0..N).all(|k| {
+        let mut expected = inner[k];
+        for axis in (0..shape.len()).rev() {
+            if shape[axis] == 1 {
+                continue;
+            }
+            if strides[k][axis] != expected {
+                return false;
+            }
+            expected *= shape[axis] as isize;
+        }
+        true
+    });
+    if single_row {
+        f(offsets, shape.iter().product(), inner);
+        return;
+    }
     let (shape, strides) = coalesce(shape, strides);
     let inner_axis = shape.len() - 1;
     let len = shape[inner_axis];
