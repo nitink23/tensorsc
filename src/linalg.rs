@@ -8,7 +8,7 @@
 //! The kernel is the classic i-k-j loop: for each row of the left matrix it
 //! adds scaled rows of the right matrix into the output row, so the innermost
 //! loop runs over contiguous memory and vectorizes. It's a straightforward,
-//! correct kernel, not a tuned BLAS (no cache blocking or threads yet).
+//! kernel with four-row reuse for larger products; no BLAS or worker threads.
 
 use crate::arith::{Numeric, with_numeric};
 use crate::autograd::{Saved, no_grad, record, sum_to, when};
@@ -21,7 +21,31 @@ use crate::tensor::{Tensor, contiguous_strides};
 
 /// `c += a @ b` for row-major `a` (m x k), `b` (k x n) and `c` (m x n).
 fn gemm<T: Numeric>(a: &[T], b: &[T], c: &mut [T], m: usize, k: usize, n: usize) {
-    for i in 0..m {
+    // Update four output rows together so each loaded B value is reused.
+    // Keep p ascending for every output (no reassociation of the sum).
+    let grouped = if n >= 32 && k >= 16 { m / 4 * 4 } else { 0 };
+    for i in (0..grouped).step_by(4) {
+        let (c0, rest) = c[i * n..(i + 4) * n].split_at_mut(n);
+        let (c1, rest) = rest.split_at_mut(n);
+        let (c2, c3) = rest.split_at_mut(n);
+        for p in 0..k {
+            let (a0, a1, a2, a3) = (
+                a[i * k + p],
+                a[(i + 1) * k + p],
+                a[(i + 2) * k + p],
+                a[(i + 3) * k + p],
+            );
+            let b_row = &b[p * n..(p + 1) * n];
+            for j in 0..n {
+                let bj = b_row[j];
+                c0[j] = c0[j].add(a0.mul(bj));
+                c1[j] = c1[j].add(a1.mul(bj));
+                c2[j] = c2[j].add(a2.mul(bj));
+                c3[j] = c3[j].add(a3.mul(bj));
+            }
+        }
+    }
+    for i in grouped..m {
         let c_row = &mut c[i * n..(i + 1) * n];
         for p in 0..k {
             let a_ip = a[i * k + p];
