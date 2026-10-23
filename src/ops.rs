@@ -744,9 +744,12 @@ impl Tensor {
     /// True when every pair of (broadcast) elements satisfies
     /// `|a - b| <= atol + rtol * |b|`. NaNs never compare close.
     pub fn allclose(&self, other: &Tensor, rtol: f64, atol: f64) -> Result<bool> {
+        if self.dtype() == other.dtype() {
+            return with_dtype!(self.dtype(), T => self.allclose_elements::<T>(other, rtol, atol));
+        }
+        // Preserve the previous f64 comparison semantics for mixed dtypes.
         let (a, b) = (self.to_dtype(DType::F64), other.to_dtype(DType::F64));
-        let close = a.zip_map::<f64, bool>(&b, |x, y| (x - y).abs() <= atol + rtol * y.abs())?;
-        Ok(!close.any_element::<bool>(|ok| !ok))
+        a.allclose_elements::<f64>(&b, rtol, atol)
     }
 }
 

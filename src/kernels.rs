@@ -168,6 +168,44 @@ impl Tensor {
         Tensor::from_vec(out, &shape)
     }
 
+    /// Compare directly in storage without allocating converted inputs or an
+    /// output mask. Conversion to f64 happens per value, as in the old path.
+    pub(crate) fn allclose_elements<T: Element>(
+        &self,
+        other: &Tensor,
+        rtol: f64,
+        atol: f64,
+    ) -> Result<bool> {
+        let shape = broadcast_shapes(&self.shape, &other.shape)?;
+        let a = self.broadcast_to(&shape)?;
+        let b = other.broadcast_to(&shape)?;
+        Ok(read_both::<T, _>(&a, &b, |da, db| {
+            let mut close = true;
+            for_each_row(
+                &shape,
+                [&a.strides, &b.strides],
+                [a.offset, b.offset],
+                |[pa, pb], len, [sa, sb]| {
+                    if !close {
+                        return;
+                    }
+                    close = positions(pa, len, sa)
+                        .zip(positions(pb, len, sb))
+                        .all(|(i, j)| {
+                            let (x, y) = (da[i].to_f64(), db[j].to_f64());
+                            // Equal signed infinities are close; other nonfinite
+                            // pairs must not pass an infinite tolerance bound.
+                            x == y
+                                || (x.is_finite()
+                                    && y.is_finite()
+                                    && (x - y).abs() <= atol + rtol * y.abs())
+                        });
+                },
+            );
+            close
+        }))
+    }
+
     /// In-place [`Tensor::zip_map`]: writes `f(self, other)` back through this
     /// view. Both have dtype `A`; `other` must broadcast to this tensor's
     /// shape (not the reverse).

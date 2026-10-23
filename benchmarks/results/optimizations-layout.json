@@ -1,0 +1,183 @@
+{
+  "python": "3.13.5",
+  "numpy": "2.5.4",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "build": "release",
+  "statistic": "median of five batches; adaptive batch length >=20ms unless capped",
+  "results": [
+    {
+      "operation": "add",
+      "side": 4,
+      "tensorsc_s": 6.786529525015794e-07,
+      "numpy_s": 3.4757080058511747e-07
+    },
+    {
+      "operation": "mul_scalar",
+      "side": 4,
+      "tensorsc_s": 6.31701659870032e-07,
+      "numpy_s": 7.032501230241905e-07
+    },
+    {
+      "operation": "exp",
+      "side": 4,
+      "tensorsc_s": 2.994262686684124e-07,
+      "numpy_s": 3.313934335835711e-07
+    },
+    {
+      "operation": "sum",
+      "side": 4,
+      "tensorsc_s": 2.9489746111721615e-07,
+      "numpy_s": 4.5051574559806795e-07
+    },
+    {
+      "operation": "sum_axis0",
+      "side": 4,
+      "tensorsc_s": 1.0019866927279963e-06,
+      "numpy_s": 1.013916012482241e-06
+    },
+    {
+      "operation": "sum_axis1",
+      "side": 4,
+      "tensorsc_s": 5.792236308366228e-07,
+      "numpy_s": 1.0012390134761517e-06
+    },
+    {
+      "operation": "allclose_equal",
+      "side": 4,
+      "tensorsc_s": 8.615386981603024e-07,
+      "numpy_s": 1.3316015667896863e-05
+    },
+    {
+      "operation": "reshape_view",
+      "side": 4,
+      "tensorsc_s": 4.2647705100762323e-07,
+      "numpy_s": 1.2412414562845697e-07
+    },
+    {
+      "operation": "tolist",
+      "side": 4,
+      "tensorsc_s": 2.9790649591632246e-07,
+      "numpy_s": 2.1037292441405953e-07
+    },
+    {
+      "operation": "matmul",
+      "side": 4,
+      "tensorsc_s": 1.2106079090301591e-06,
+      "numpy_s": 8.96194460864308e-07
+    },
+    {
+      "operation": "add",
+      "side": 128,
+      "tensorsc_s": 2.244152831565316e-06,
+      "numpy_s": 1.8189514179312027e-06
+    },
+    {
+      "operation": "mul_scalar",
+      "side": 128,
+      "tensorsc_s": 1.914666746927196e-06,
+      "numpy_s": 2.2183715842061247e-06
+    },
+    {
+      "operation": "exp",
+      "side": 128,
+      "tensorsc_s": 3.3229589917027624e-05,
+      "numpy_s": 1.1675976566039026e-05
+    },
+    {
+      "operation": "sum",
+      "side": 128,
+      "tensorsc_s": 1.651983644990196e-06,
+      "numpy_s": 3.076586921224589e-06
+    },
+    {
+      "operation": "sum_axis0",
+      "side": 128,
+      "tensorsc_s": 3.1630737282739574e-06,
+      "numpy_s": 3.06712645681273e-06
+    },
+    {
+      "operation": "sum_axis1",
+      "side": 128,
+      "tensorsc_s": 2.479931652032974e-06,
+      "numpy_s": 3.7708862237195717e-06
+    },
+    {
+      "operation": "allclose_equal",
+      "side": 128,
+      "tensorsc_s": 2.1090624954922532e-05,
+      "numpy_s": 2.624765625114378e-05
+    },
+    {
+      "operation": "reshape_view",
+      "side": 128,
+      "tensorsc_s": 4.1727905397692666e-07,
+      "numpy_s": 1.2549438466180618e-07
+    },
+    {
+      "operation": "tolist",
+      "side": 128,
+      "tensorsc_s": 0.00013477421862262418,
+      "numpy_s": 0.00014056484405955416
+    },
+    {
+      "operation": "matmul",
+      "side": 128,
+      "tensorsc_s": 0.0001629320313440985,
+      "numpy_s": 6.57019531900005e-05
+    },
+    {
+      "operation": "add",
+      "side": 512,
+      "tensorsc_s": 0.00028766406285285484,
+      "numpy_s": 0.0003052992187804193
+    },
+    {
+      "operation": "mul_scalar",
+      "side": 512,
+      "tensorsc_s": 0.0002701664061532938,
+      "numpy_s": 0.0002722710933085182
+    },
+    {
+      "operation": "exp",
+      "side": 512,
+      "tensorsc_s": 0.0006916593738424126,
+      "numpy_s": 0.00037932499981252477
+    },
+    {
+      "operation": "sum",
+      "side": 512,
+      "tensorsc_s": 2.3978125000212458e-05,
+      "numpy_s": 4.401542969389993e-05
+    },
+    {
+      "operation": "sum_axis0",
+      "side": 512,
+      "tensorsc_s": 4.2592968839016976e-05,
+      "numpy_s": 2.09392578653933e-05
+    },
+    {
+      "operation": "sum_axis1",
+      "side": 512,
+      "tensorsc_s": 2.6482128873794863e-05,
+      "numpy_s": 4.641113287107146e-05
+    },
+    {
+      "operation": "allclose_equal",
+      "side": 512,
+      "tensorsc_s": 0.0013096500042593107,
+      "numpy_s": 0.0017844687536126003
+    },
+    {
+      "operation": "reshape_view",
+      "side": 512,
+      "tensorsc_s": 4.3431701612917095e-07,
+      "numpy_s": 1.2061462584256333e-07
+    },
+    {
+      "operation": "tolist",
+      "side": 512,
+      "tensorsc_s": 0.004027725008199923,
+      "numpy_s": 0.003414124992559664
+    }
+  ]
+}
