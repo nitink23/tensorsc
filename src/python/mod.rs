@@ -3,8 +3,10 @@
 
 mod buffer;
 mod convert;
+mod dlpack;
 mod grad;
 mod pytensor;
+use self::dlpack::from_dlpack;
 
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
@@ -361,6 +363,7 @@ fn tensorsc(m: &Bound<'_, PyModule>) -> PyResult<()> {
         argmin,
         matmul,
         from_numpy,
+        from_dlpack,
     );
     Ok(())
 }

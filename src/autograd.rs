@@ -93,10 +93,14 @@ pub(crate) struct Saved {
 
 impl Saved {
     pub(crate) fn new(tensor: &Tensor) -> Saved {
-        Saved {
-            tensor: tensor.detach(),
-            version: tensor.storage.version(),
-        }
+        let tensor = tensor.detach();
+        let tensor = if tensor.storage.is_externally_shared() {
+            tensor.deep_copy()
+        } else {
+            tensor
+        };
+        let version = tensor.storage.version();
+        Saved { tensor, version }
     }
 
     pub(crate) fn get(&self) -> Result<&Tensor> {

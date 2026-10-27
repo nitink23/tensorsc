@@ -74,6 +74,10 @@ class Tensor:
     def is_writable(self) -> bool:
         """False for tensors over read-only memory (e.g. a read-only NumPy array)."""
 
+    def __dlpack__(self, stream: Any = None, *, max_version: tuple[int, int] | None = None, dl_device: tuple[int, int] | None = None, copy: bool | None = None) -> Any:
+        """Share CPU data via DLPack; detach tracked tensors first. Export is zero-copy only."""
+    def __dlpack_device__(self) -> tuple[int, int]: ...
+
     # NumPy: tensors support the buffer protocol, so np.asarray(t) shares memory.
     def numpy(self) -> Any:
         """A NumPy array sharing this tensor's memory (read-only for bool/expanded tensors)."""
@@ -237,6 +241,12 @@ def no_grad() -> grad_mode:
 def enable_grad() -> grad_mode: ...
 def is_grad_enabled() -> bool: ...
 def set_grad_enabled(mode: bool) -> None: ...
+
+# DLPack
+def from_dlpack(obj: Any, *, copy: bool | None = None) -> Tensor:
+    """Import CPU data. copy=False requires sharing; copy=True makes an owned copy.
+    Bool and layouts with gaps copy by default. Imported values start outside autograd.
+    """
 
 # NumPy
 def from_numpy(array: Any) -> Tensor:

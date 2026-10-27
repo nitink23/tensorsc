@@ -11,6 +11,8 @@ pub mod device;
 pub mod dtype;
 pub mod error;
 pub mod indexing;
+#[cfg(feature = "dlpack")]
+pub mod interop;
 mod kernels;
 pub mod linalg;
 pub mod ops;

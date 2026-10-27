@@ -14,7 +14,7 @@ use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 use std::slice;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::device::Device;
@@ -41,6 +41,8 @@ pub struct Storage {
     /// Bumped on every write, so autograd can tell when a tensor it saved for
     /// the backward pass has been modified since.
     version: AtomicU64,
+    // Foreign writes bypass our version counter; saved gradients need snapshots.
+    externally_shared: AtomicBool,
 }
 
 // SAFETY: the elements are only reached through `read` and `write`, which
@@ -75,6 +77,7 @@ impl Storage {
             },
             lock: RwLock::new(()),
             version: AtomicU64::new(0),
+            externally_shared: AtomicBool::new(false),
         }
     }
 
@@ -109,6 +112,7 @@ impl Storage {
             owner: Owner::External(owner),
             lock: RwLock::new(()),
             version: AtomicU64::new(0),
+            externally_shared: AtomicBool::new(true),
         }
     }
 
@@ -135,6 +139,18 @@ impl Storage {
     /// How many times the elements have been written to (see `version`).
     pub fn version(&self) -> u64 {
         self.version.load(Ordering::Relaxed)
+    }
+
+    /// Marks an allocation as observable/mutable outside our storage locks.
+    /// Invalidate earlier saved values; future saves take independent snapshots.
+    #[cfg(any(feature = "python", feature = "dlpack"))]
+    pub(crate) fn mark_externally_shared(&self) {
+        self.externally_shared.store(true, Ordering::Relaxed);
+        self.version.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn is_externally_shared(&self) -> bool {
+        self.externally_shared.load(Ordering::Relaxed)
     }
 
     /// Address of the first element, for handing memory to other libraries.

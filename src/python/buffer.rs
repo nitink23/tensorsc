@@ -275,6 +275,7 @@ pub(crate) unsafe fn export(
         ));
     }
 
+    t.storage().mark_externally_shared();
     let itemsize = t.dtype().itemsize();
     // Shape then strides (in bytes), freed in `release`.
     let mut dims: Vec<isize> = t.shape().iter().map(|&d| d as isize).collect();

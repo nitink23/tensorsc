@@ -149,6 +149,23 @@ impl PyTensor {
         self.inner.overlaps_memory(&other.inner)
     }
 
+    #[pyo3(signature=(stream=None, *, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__(
+        &self,
+        py: Python<'_>,
+        stream: Option<&Bound<'_, PyAny>>,
+        max_version: Option<(u32, u32)>,
+        dl_device: Option<(u32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<Py<PyAny>> {
+        let request = dlpark::python::ExportRequest::parse(stream, max_version, dl_device, copy)?;
+        dlpark::python::export_dlpack(self, py, request)
+    }
+
+    fn __dlpack_device__(&self) -> (u32, i32) {
+        (1, 0)
+    }
+
     // ---- NumPy and the buffer protocol ----
 
     /// False for tensors over read-only memory (e.g. from a read-only NumPy array).
