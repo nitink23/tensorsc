@@ -1,0 +1,70 @@
+{
+  "build": "release",
+  "python": "3.13.5",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "numpy": "2.5.4",
+  "torch": "2.14.1+cpu",
+  "method": "median of 5 batches of 10000 calls, inputs and pointer/value checks outside timing",
+  "results": [
+    {
+      "operation": "from_numpy_buffer",
+      "elements": 16,
+      "seconds": 3.1060001347213985e-07
+    },
+    {
+      "operation": "from_numpy_dlpack",
+      "elements": 16,
+      "seconds": 1.1870400048792362e-06
+    },
+    {
+      "operation": "to_numpy_buffer",
+      "elements": 16,
+      "seconds": 3.692000173032284e-07
+    },
+    {
+      "operation": "to_numpy_dlpack",
+      "elements": 16,
+      "seconds": 3.206999972462654e-07
+    },
+    {
+      "operation": "from_torch_dlpack",
+      "elements": 16,
+      "seconds": 4.966800101101399e-07
+    },
+    {
+      "operation": "to_torch_dlpack",
+      "elements": 16,
+      "seconds": 1.5762999886646867e-06
+    },
+    {
+      "operation": "from_numpy_buffer",
+      "elements": 262144,
+      "seconds": 4.1380999609827997e-07
+    },
+    {
+      "operation": "from_numpy_dlpack",
+      "elements": 262144,
+      "seconds": 1.23282999265939e-06
+    },
+    {
+      "operation": "to_numpy_buffer",
+      "elements": 262144,
+      "seconds": 3.634300082921982e-07
+    },
+    {
+      "operation": "to_numpy_dlpack",
+      "elements": 262144,
+      "seconds": 3.0976999551057816e-07
+    },
+    {
+      "operation": "from_torch_dlpack",
+      "elements": 262144,
+      "seconds": 4.85029979608953e-07
+    },
+    {
+      "operation": "to_torch_dlpack",
+      "elements": 262144,
+      "seconds": 1.0915999999269843e-06
+    }
+  ]
+}
